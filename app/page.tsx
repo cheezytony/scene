@@ -1,8 +1,14 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Control, Scene } from "@/lib/schema";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import type { Camera, Control, Scene } from "@/lib/schema";
+import { createHistory, historyReducer } from "@/lib/history";
+import { updateCamera } from "@/lib/edit";
+import CameraPanel from "@/components/CameraPanel";
+import TimelinePanel from "@/components/TimelinePanel";
+import TranscriptPanel from "@/components/TranscriptPanel";
+import type { EditFn } from "@/components/ui";
 import { activeKeyframe, cameraAt, keyframesFor, variationsAt, worldPose } from "@/lib/resolve";
 import { DEFAULT_LIMITS, LIMIT_FIELDS, limitConflicts, type Limits } from "@/lib/limits";
 import { SCHEMA_VERSION, SceneFormatError, migrateScene, serializeScene } from "@/lib/migrate";
@@ -24,7 +30,16 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${Math.floor(s % 60).toString(
 
 export default function Home() {
   const [script, setScript] = useState(SAMPLE_SCRIPT);
-  const [scene, setScene] = useState<Scene | null>(null);
+  // The scene lives in an undo history: every edit is undoable, and loading a scene starts fresh.
+  const [history, dispatch] = useReducer(historyReducer<Scene | null>, createHistory<Scene | null>(null));
+  const scene = history.present;
+  const loadScene = useCallback((s: Scene) => dispatch({ type: "reset", present: s }), []);
+  const edit = useCallback<EditFn>(
+    (fn, key) => dispatch({ type: "edit", next: (s) => (s ? fn(s) : s), key, now: Date.now() }),
+    [],
+  );
+  const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
+  const [cameraStep, setCameraStep] = useState(0.1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [t, setT] = useState(0);
@@ -68,7 +83,8 @@ export default function Home() {
   async function importFile(file: File) {
     try {
       const { scene: imported, fromVersion } = migrateScene(JSON.parse(await file.text()));
-      setScene(imported);
+      loadScene(imported);
+      setSelectedCameraId(null);
       setViolations([]);
       setViewMode("orbit");
       setSelectedId(imported.entities[0]?.id ?? null);
@@ -104,7 +120,7 @@ export default function Home() {
         body: JSON.stringify({ script, limits }),
       });
       // Platform errors (timeouts, body limits) are not JSON, so parse defensively.
-      let data: { scene?: Scene; violations?: string[]; error?: string } | null = null;
+      let data: { scene?: Scene; violations?: string[]; error?: string; stats?: { totalMs?: number } } | null = null;
       try {
         data = JSON.parse(await res.text());
       } catch {}
@@ -119,8 +135,10 @@ export default function Home() {
         );
       }
       if (!data?.scene) throw new Error("Unexpected response from the server.");
-      setScene(data.scene);
+      loadScene(data.scene);
+      setSelectedCameraId(null);
       setViolations(data.violations ?? []);
+      if (data.stats?.totalMs) setNotice(`Generated in ${Math.round(data.stats.totalMs / 1000)} s.`);
       setViewMode("orbit");
       setSelectedId(data.scene.entities[0]?.id ?? null);
       seek(0);
@@ -133,9 +151,9 @@ export default function Home() {
 
   /** Edit a variation on the keyframe currently in effect for an entity. */
   function setVariation(entityId: string, key: string, value: string) {
-    setScene((s) => {
-      if (!s) return s;
-      const kf = activeKeyframe(keyframesFor(s, entityId), tRef.current);
+    const at = tRef.current;
+    edit((s) => {
+      const kf = activeKeyframe(keyframesFor(s, entityId), at);
       if (!kf) return s;
       return {
         ...s,
@@ -150,8 +168,27 @@ export default function Home() {
               },
         ),
       };
-    });
+    }, `var:${entityId}:${key}`);
   }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      // Inside a text field, leave undo to the field itself.
+      if (el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable)) return;
+      const k = e.key.toLowerCase();
+      if (k === "z") {
+        e.preventDefault();
+        dispatch({ type: e.shiftKey ? "redo" : "undo" });
+      } else if (k === "y") {
+        e.preventDefault();
+        dispatch({ type: "redo" });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   function download() {
     if (!scene) return;
@@ -168,6 +205,13 @@ export default function Home() {
   // Functional update so quick successive changes compose; persistence follows state, not events.
   const updateViewer = (patch: Partial<ViewerSettings>) => setViewer((v) => ({ ...v, ...patch }));
   useEffect(() => saveViewerSettings(viewer), [viewer]);
+  // Camera drag handles only work in the free orbit view (walk/fly use the mouse to look around).
+  const handlesNotice =
+    viewMode === "shot"
+      ? { text: "Drag handles are shown in the free view.", action: "Free view", run: () => setViewMode("orbit") }
+      : viewer.movement !== "orbit"
+        ? { text: "Drag handles need Orbit movement (you are in walk or fly).", action: "Use Orbit", run: () => updateViewer({ movement: "orbit" }) }
+        : null;
   const currentCam = scene ? cameraAt(scene, t) : null;
   const conflicts = limitConflicts(limits);
   // Only stringify when the JSON tab is open, and not on every playback frame.
@@ -197,9 +241,27 @@ export default function Home() {
             Import JSON
           </button>
           {scene && (
-            <button onClick={download} className="rounded border border-white/15 px-3 py-1 text-sm hover:bg-white/10">
-              Export JSON
-            </button>
+            <>
+              <button
+                onClick={() => dispatch({ type: "undo" })}
+                disabled={!history.past.length}
+                title="Undo (Ctrl/Cmd+Z)"
+                className="rounded border border-white/15 px-3 py-1 text-sm hover:bg-white/10 disabled:opacity-40"
+              >
+                Undo
+              </button>
+              <button
+                onClick={() => dispatch({ type: "redo" })}
+                disabled={!history.future.length}
+                title="Redo (Ctrl/Cmd+Shift+Z)"
+                className="rounded border border-white/15 px-3 py-1 text-sm hover:bg-white/10 disabled:opacity-40"
+              >
+                Redo
+              </button>
+              <button onClick={download} className="rounded border border-white/15 px-3 py-1 text-sm hover:bg-white/10">
+                Export JSON
+              </button>
+            </>
           )}
         </div>
       </header>
@@ -270,6 +332,16 @@ export default function Home() {
                 viewMode={viewMode}
                 settings={viewer}
                 bounds={bounds}
+                selectedCameraId={selectedCameraId}
+                onSelectCamera={(id) => {
+                  setSelectedCameraId(id);
+                  setTab("cameras");
+                }}
+                onCameraChange={(id, patch: Partial<Camera>) =>
+                  edit((s) => updateCamera(s, id, patch), `cam:${id}:${Object.keys(patch).join(",")}`)
+                }
+                editCameras={tab === "cameras"}
+                snap={cameraStep}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-sm text-white/50">
@@ -418,53 +490,9 @@ export default function Home() {
           </nav>
 
           <div className="max-h-[28rem] overflow-auto p-3 text-sm">
-            {tab === "timeline" && (
-              <ol className="flex flex-col gap-2">
-                {scene.timeline.map((b) => (
-                  <li key={b.id}>
-                    <button
-                      onClick={() => seek(b.startSec)}
-                      className={`w-full rounded border p-2 text-left ${
-                        currentBeat?.id === b.id ? "border-indigo-400" : "border-white/10 hover:bg-white/5"
-                      }`}
-                    >
-                      <div className="flex justify-between">
-                        <b>{b.title}</b>
-                        <span className="tabular-nums text-white/50">
-                          {fmt(b.startSec)}–{fmt(b.endSec)}
-                        </span>
-                      </div>
-                      <div className="text-xs text-white/50">
-                        {b.location} · {b.mood}
-                      </div>
-                      <p className="mt-1 text-white/80">{b.summary}</p>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            )}
+            {tab === "timeline" && <TimelinePanel scene={scene} t={t} onSeek={seek} edit={edit} />}
 
-            {tab === "transcript" && (
-              <ul className="flex flex-col gap-1">
-                {scene.transcript.map((l) => {
-                  const active = t >= l.startSec && t < l.endSec;
-                  return (
-                    <li key={l.id}>
-                      <button
-                        onClick={() => seek(l.startSec)}
-                        className={`flex w-full gap-3 rounded p-1.5 text-left ${active ? "bg-indigo-500/25" : "hover:bg-white/5"}`}
-                      >
-                        <span className="w-10 shrink-0 tabular-nums text-white/40">{fmt(l.startSec)}</span>
-                        <span className="w-20 shrink-0 text-xs uppercase text-white/50">
-                          {l.kind === "dialogue" ? l.speaker : l.kind}
-                        </span>
-                        <span className={l.kind === "dialogue" ? "" : "italic text-white/70"}>{l.text}</span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
+            {tab === "transcript" && <TranscriptPanel scene={scene} t={t} onSeek={seek} edit={edit} />}
 
             {tab === "entities" && (
               <div className="grid gap-4 md:grid-cols-[220px_1fr]">
@@ -490,32 +518,20 @@ export default function Home() {
             )}
 
             {tab === "cameras" && (
-              <ul className="flex flex-col gap-1">
-                {scene.cameras.map((c) => (
-                  <li key={c.id}>
-                    <button
-                      onClick={() => {
-                        seek(c.t);
-                        setViewMode("shot");
-                      }}
-                      className={`w-full rounded border p-2 text-left ${
-                        currentCam?.camera.id === c.id ? "border-amber-400" : "border-white/10 hover:bg-white/5"
-                      }`}
-                    >
-                      <div className="flex justify-between">
-                        <b>{c.label}</b>
-                        <span className="tabular-nums text-white/50">{fmt(c.t)}</span>
-                      </div>
-                      <div className="text-xs text-white/50">
-                        {c.shot.replaceAll("_", " ")} · {c.movement} · fov {Math.round(c.fov)}° · at ({c.position.x.toFixed(1)},{" "}
-                        {c.position.y.toFixed(1)}, {c.position.z.toFixed(1)}) → ({c.lookAt.x.toFixed(1)}, {c.lookAt.y.toFixed(1)},{" "}
-                        {c.lookAt.z.toFixed(1)})
-                      </div>
-                      {c.note && <p className="mt-1 text-white/70">{c.note}</p>}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <CameraPanel
+                scene={scene}
+                t={t}
+                selectedId={selectedCameraId}
+                onSelect={setSelectedCameraId}
+                onLookThrough={(c) => {
+                  seek(c.t);
+                  setViewMode("shot");
+                }}
+                step={cameraStep}
+                onStepChange={setCameraStep}
+                edit={edit}
+                handlesNotice={handlesNotice}
+              />
             )}
 
             {tab === "json" && (

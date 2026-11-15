@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { Grid, OrbitControls } from "@react-three/drei";
-import type { Entity, Scene } from "@/lib/schema";
+import { Grid, Line, OrbitControls, TransformControls } from "@react-three/drei";
+import type { Camera, Entity, Scene } from "@/lib/schema";
 import { cameraAt, worldPose } from "@/lib/resolve";
 import { EYE_HEIGHT, FLOOR_CLEARANCE, moveSpeed, type Bounds } from "@/lib/space";
 import type { ViewerSettings } from "@/lib/viewer-settings";
@@ -165,27 +165,107 @@ function FovReset() {
   return null;
 }
 
-/** Small camera props at each setup so you can see coverage from the free view. */
-function CameraMarkers({ scene, t }: { scene: Scene; t: number }) {
+/** Small camera props at each setup so you can see coverage from the free view. Click one to select it. */
+function CameraMarkers({
+  scene,
+  t,
+  selectedId,
+  onSelect,
+}: {
+  scene: Scene;
+  t: number;
+  selectedId: string | null;
+  onSelect?: (id: string) => void;
+}) {
   const active = cameraAt(scene, t)?.camera.id;
   return (
     <>
       {scene.cameras.map((c) => (
-        <group
-          key={c.id}
-          position={[c.position.x, c.position.y, c.position.z]}
-          ref={(g) => g?.lookAt(c.lookAt.x, c.lookAt.y, c.lookAt.z)}
-        >
-          <mesh>
-            <boxGeometry args={[0.3, 0.2, 0.3]} />
-            <meshStandardMaterial color={c.id === active ? "#fbbf24" : "#64748b"} />
-          </mesh>
-          <mesh position={[0, 0, 0.22]} rotation={[Math.PI / 2, 0, 0]}>
-            <cylinderGeometry args={[0.08, 0.12, 0.18, 12]} />
-            <meshStandardMaterial color="#1e293b" />
-          </mesh>
+        <group key={c.id}>
+          <group
+            position={[c.position.x, c.position.y, c.position.z]}
+            ref={(g) => g?.lookAt(c.lookAt.x, c.lookAt.y, c.lookAt.z)}
+            onClick={(e) => {
+              if (!onSelect) return;
+              e.stopPropagation();
+              onSelect(c.id);
+            }}
+          >
+            <mesh>
+              <boxGeometry args={[0.3, 0.2, 0.3]} />
+              <meshStandardMaterial
+                color={c.id === selectedId ? "#38bdf8" : c.id === active ? "#fbbf24" : "#64748b"}
+                emissive={c.id === selectedId ? "#38bdf8" : "#000000"}
+                emissiveIntensity={0.3}
+              />
+            </mesh>
+            <mesh position={[0, 0, 0.22]} rotation={[Math.PI / 2, 0, 0]}>
+              <cylinderGeometry args={[0.08, 0.12, 0.18, 12]} />
+              <meshStandardMaterial color="#1e293b" />
+            </mesh>
+          </group>
+          {c.id === selectedId && (
+            <Line
+              points={[
+                [c.position.x, c.position.y, c.position.z],
+                [c.lookAt.x, c.lookAt.y, c.lookAt.z],
+              ]}
+              color="#38bdf8"
+              lineWidth={1.5}
+              dashed
+              dashSize={0.2}
+              gapSize={0.12}
+              raycast={() => null}
+            />
+          )}
         </group>
       ))}
+    </>
+  );
+}
+
+/**
+ * Drag handles for the selected camera: one moves the camera, the other moves the point it looks
+ * at. They write to the same fields as the numeric inputs, snapped to `snap` meters.
+ */
+function CameraGizmos({
+  camera,
+  snap,
+  onChange,
+}: {
+  camera: Camera;
+  snap: number;
+  onChange: (patch: Partial<Camera>) => void;
+}) {
+  // Held in state so each control attaches once its object exists.
+  const [position, setPosition] = useState<THREE.Group | null>(null);
+  const [aim, setAim] = useState<THREE.Mesh | null>(null);
+  const read = (o: THREE.Object3D) => ({ x: o.position.x, y: o.position.y, z: o.position.z });
+  return (
+    <>
+      <group ref={setPosition} position={[camera.position.x, camera.position.y, camera.position.z]} />
+      {position && (
+        <TransformControls
+          object={position}
+          mode="translate"
+          size={0.7}
+          translationSnap={snap}
+          onObjectChange={() => onChange({ position: read(position) })}
+        />
+      )}
+      <mesh ref={setAim} position={[camera.lookAt.x, camera.lookAt.y, camera.lookAt.z]}>
+        <sphereGeometry args={[0.1, 16, 12]} />
+        <meshBasicMaterial color="#38bdf8" />
+      </mesh>
+      {aim && (
+        <TransformControls
+          object={aim}
+          mode="translate"
+          size={0.7}
+          translationSnap={snap}
+          onObjectChange={() => onChange({ lookAt: read(aim) })}
+        />
+      )}
     </>
   );
 }
@@ -369,6 +449,11 @@ export default function SceneViewer({
   viewMode,
   settings,
   bounds,
+  selectedCameraId = null,
+  onSelectCamera,
+  onCameraChange,
+  editCameras = false,
+  snap = 0.1,
 }: {
   scene: Scene;
   t: number;
@@ -377,9 +462,17 @@ export default function SceneViewer({
   viewMode: "orbit" | "shot";
   settings: ViewerSettings;
   bounds: Bounds;
+  /** Camera editing (all optional, so the viewer still works read-only). */
+  selectedCameraId?: string | null;
+  onSelectCamera?: (id: string) => void;
+  onCameraChange?: (id: string, patch: Partial<Camera>) => void;
+  /** Show drag handles on the selected camera (free orbit view only). */
+  editCameras?: boolean;
+  snap?: number;
 }) {
   const shot = viewMode === "shot" && scene.cameras.length > 0;
   const firstPerson = !shot && settings.movement !== "orbit";
+  const editing = editCameras && !shot && !firstPerson ? scene.cameras.find((c) => c.id === selectedCameraId) : undefined;
   const container = useRef<HTMLDivElement>(null);
 
   return (
@@ -420,7 +513,10 @@ export default function SceneViewer({
         ) : (
           <>
             <FovReset />
-            <CameraMarkers scene={scene} t={t} />
+            <CameraMarkers scene={scene} t={t} selectedId={selectedCameraId} onSelect={onSelectCamera} />
+            {editing && onCameraChange && (
+              <CameraGizmos key={editing.id} camera={editing} snap={snap} onChange={(patch) => onCameraChange(editing.id, patch)} />
+            )}
             {settings.boundaries && <BoundsBox bounds={bounds} />}
             {settings.movement === "orbit" ? (
               <OrbitRig settings={settings} bounds={bounds} />

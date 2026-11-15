@@ -14,6 +14,17 @@ npm run dev
 
 `lib/pipeline.ts` builds the scene in three model calls, each constrained to its own small schema: **outline** (title, beats, transcript) and **cast** (entities) run in parallel, then **motion** (keyframes and cameras) runs with both as context. The API compiles each structured-output schema into a grammar with a size limit, and the whole scene in one schema is over it (`The compiled grammar is too large`). The scene file format and the `/api/analyze` response are the same as a single call would give.
 
+**Speed.** Motion (keyframes and cameras) is the longest stage and grows with the script, so it is split into chunks cut at place changes (long stays in one place are split every 3 beats) and the chunks run in parallel, at most 4 calls at once. Wall time follows the longest chunk instead of the whole film: the one-page sample went from 240 s to about 125 s. A short or single-place script is one chunk, as before. Parallel chunks cannot see each other, so the cast stage also decides a fixed **layout** (where each stationary entity stands in each place) that every chunk is given; each chunk also starts with a keyframe for every entity so the cuts join cleanly. The layout is a pipeline input only and is not part of the scene file.
+
+The `/api/analyze` response includes `stats` (total and per-stage time, calls and tokens). The UI shows "Generated in N s".
+
+Optional environment variables (restart after changing):
+
+- `SCENE_CHUNK_BEATS` (default 3): most beats planned in one call. Lower is faster but gives the model less continuity inside one place.
+- `SCENE_FAST_MODE=1`: Opus fast mode, up to 2.5x faster output at twice the token price. Off by default; not verified end to end here.
+
+Parallel chunks read the shared context separately, so a run uses more input tokens (about 20% more cost for the sample) in exchange for the speedup.
+
 Scene limits are enforced where they are decided, each with one repair pass that regenerates only that stage: counts at the cast stage, attached/in/on limits at the motion stage.
 
 When you add or change scene fields (`lib/schema.ts`), put them in the stage they belong to, then run `npm run check:schemas`. It asks the API to compile every stage schema (16 output tokens each, so it costs next to nothing) and fails if one is too large; split that stage if so.
@@ -28,6 +39,16 @@ Rendering uses three.js (MIT) through react-three-fiber. Orbit and camera views 
 - **Speed:** Slow, Normal, Fast. Scaled a little for large scenes.
 - **Space around the scene:** Tight, Auto (default), Wide. The space is computed from everything the scene uses (entities, their sizes, every camera setup) plus room around it, with a minimum so tiny scenes still have space.
 - **Boundaries** (on by default): keeps the camera and its focus point inside that space and above the floor so you can't drift away. Turn off for unrestricted movement. **Grid** toggles the floor grid.
+
+## Editing a scene
+
+After generating (or importing) a scene you can edit it by hand; every edit is undoable (Undo / Redo buttons, or Ctrl/Cmd+Z when no text field is focused), and a burst of edits to one field (typing, dragging a handle) is one undo step.
+
+- **Timeline:** add, edit, delete and reorder beats. Order is always derived from time, so ↑ ↓ swaps two beats' time slots and carries everything tied to each beat (its transcript lines, keyframes and cameras) with it. Inserting a beat in the middle pushes later beats, and their content, later. Deleting a beat removes its lines, keyframes and cameras (it tells you how many first). Editing a beat's start or end does not move its content.
+- **Transcript:** add, edit and delete lines, reorder them within a beat, or move a line to another beat.
+- **Cameras:** add, duplicate, delete and edit cameras with exact numbers (position, look-at point, field of view, start time), or drag the handles on the selected camera in the free orbit view. The step field sets both the arrow-key step in number fields (Shift ×10, Alt ×0.1) and the drag snapping. Numbers are kept valid (finite, field of view 10–120°, time inside the scene).
+
+The edit logic is in `lib/edit.ts` and `lib/history.ts` (pure and unit-tested). None of this changes the scene file format.
 
 ## Scene file format and versioning
 
