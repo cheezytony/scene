@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Control, Scene } from "@/lib/schema";
 import { activeKeyframe, cameraAt, keyframesFor, variationsAt, worldPose } from "@/lib/resolve";
 import { DEFAULT_LIMITS, LIMIT_FIELDS, limitConflicts, type Limits } from "@/lib/limits";
+import { SCHEMA_VERSION, SceneFormatError, migrateScene, serializeScene } from "@/lib/migrate";
 import { SAMPLE_SCRIPT } from "@/lib/sample";
 
 const SceneViewer = dynamic(() => import("@/components/SceneViewer"), { ssr: false });
@@ -26,6 +27,8 @@ export default function Home() {
   const [violations, setViolations] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<"orbit" | "shot">("orbit");
   const [accessCode, setAccessCode] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const tRef = useRef(0);
 
   const seek = useCallback((n: number) => {
@@ -51,9 +54,38 @@ export default function Home() {
     return () => cancelAnimationFrame(raf);
   }, [playing, duration]);
 
+  /** Load a previously exported scene file, upgrading older formats. */
+  async function importFile(file: File) {
+    try {
+      const { scene: imported, fromVersion } = migrateScene(JSON.parse(await file.text()));
+      setScene(imported);
+      setViolations([]);
+      setViewMode("orbit");
+      setSelectedId(imported.entities[0]?.id ?? null);
+      setPlaying(false);
+      seek(0);
+      setError(null);
+      setNotice(
+        fromVersion < SCHEMA_VERSION
+          ? `Imported "${file.name}", upgraded from scene format v${fromVersion} to v${SCHEMA_VERSION}.`
+          : `Imported "${file.name}".`,
+      );
+    } catch (e) {
+      setNotice(null);
+      setError(
+        e instanceof SceneFormatError
+          ? e.message
+          : e instanceof SyntaxError
+            ? "That file is not valid JSON."
+            : "Could not import that file.",
+      );
+    }
+  }
+
   async function analyze() {
     setLoading(true);
     setError(null);
+    setNotice(null);
     setPlaying(false);
     try {
       const res = await fetch("/api/analyze", {
@@ -113,7 +145,7 @@ export default function Home() {
 
   function download() {
     if (!scene) return;
-    const url = URL.createObjectURL(new Blob([JSON.stringify(scene, null, 2)], { type: "application/json" }));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(serializeScene(scene), null, 2)], { type: "application/json" }));
     const a = document.createElement("a");
     a.href = url;
     a.download = `${scene.title.replace(/\W+/g, "_").toLowerCase() || "scene"}.json`;
@@ -125,18 +157,37 @@ export default function Home() {
   const currentCam = scene ? cameraAt(scene, t) : null;
   const conflicts = limitConflicts(limits);
   // Only stringify when the JSON tab is open, and not on every playback frame.
-  const jsonText = useMemo(() => (scene && tab === "json" ? JSON.stringify(scene, null, 2) : ""), [scene, tab]);
+  const jsonText = useMemo(() => (scene && tab === "json" ? JSON.stringify(serializeScene(scene), null, 2) : ""), [scene, tab]);
   const currentBeat =scene?.timeline.find((b) => t >= b.startSec && t < b.endSec) ?? scene?.timeline.at(-1);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-4 p-4">
       <header className="flex items-baseline justify-between">
         <h1 className="text-xl font-semibold">Scene · script to 3D breakdown</h1>
-        {scene && (
-          <button onClick={download} className="rounded border border-white/15 px-3 py-1 text-sm hover:bg-white/10">
-            Export JSON
+        <div className="flex gap-2">
+          <input
+            ref={fileInput}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void importFile(file);
+              e.target.value = ""; // allow re-importing the same file
+            }}
+          />
+          <button
+            onClick={() => fileInput.current?.click()}
+            className="rounded border border-white/15 px-3 py-1 text-sm hover:bg-white/10"
+          >
+            Import JSON
           </button>
-        )}
+          {scene && (
+            <button onClick={download} className="rounded border border-white/15 px-3 py-1 text-sm hover:bg-white/10">
+              Export JSON
+            </button>
+          )}
+        </div>
       </header>
 
       <section className="grid gap-4 lg:grid-cols-[360px_1fr]">
@@ -191,6 +242,7 @@ export default function Home() {
             {loading ? "Analyzing script… (can take a minute or two)" : "Generate scene breakdown"}
           </button>
           {error && <p className="rounded bg-red-500/15 p-2 text-sm text-red-300">{error}</p>}
+          {notice && <p className="rounded bg-emerald-500/15 p-2 text-sm text-emerald-300">{notice}</p>}
         </div>
 
         <div className="flex flex-col gap-2">

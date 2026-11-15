@@ -10,6 +10,16 @@ npm install
 npm run dev
 ```
 
+## Scene file format and versioning
+
+**Export JSON** writes the scene with a `schemaVersion`; **Import JSON** loads it, upgrading older files automatically (files with no `schemaVersion` are treated as v1). Files from a newer format than the app supports are rejected with a message instead of being misread.
+
+Changing the scene shape (`lib/schema.ts`):
+
+1. Prefer additive changes (new optional-in-practice fields with a default).
+2. Bump `SCHEMA_VERSION` in `lib/migrate.ts` and add a `MIGRATIONS` step that upgrades the previous version. Steps must fill in only what is missing.
+3. Add a fixture and test for the old shape in `lib/migrate.test.ts`, and record the new schema fingerprint there. `npm test` fails if the schema changed without a version bump.
+
 ## Deploy (GitHub Actions to Vercel)
 
 `.github/workflows/deploy.yml` lints, typechecks and builds every push and PR. Pushes to `main` deploy to production; same-repo PRs get a preview deployment.
