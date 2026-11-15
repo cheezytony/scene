@@ -6,6 +6,14 @@ import type { Control, Scene } from "@/lib/schema";
 import { activeKeyframe, cameraAt, keyframesFor, variationsAt, worldPose } from "@/lib/resolve";
 import { DEFAULT_LIMITS, LIMIT_FIELDS, limitConflicts, type Limits } from "@/lib/limits";
 import { SCHEMA_VERSION, SceneFormatError, migrateScene, serializeScene } from "@/lib/migrate";
+import { computeBounds } from "@/lib/space";
+import {
+  DEFAULT_VIEWER_SETTINGS,
+  NAV_HINTS,
+  loadViewerSettings,
+  saveViewerSettings,
+  type ViewerSettings,
+} from "@/lib/viewer-settings";
 import { SAMPLE_SCRIPT } from "@/lib/sample";
 
 const SceneViewer = dynamic(() => import("@/components/SceneViewer"), { ssr: false });
@@ -28,6 +36,8 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<"orbit" | "shot">("orbit");
   const [accessCode, setAccessCode] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  // Nothing rendered before a scene exists depends on these, so reading storage here is hydration-safe.
+  const [viewer, setViewer] = useState<ViewerSettings>(loadViewerSettings);
   const fileInput = useRef<HTMLInputElement>(null);
   const tRef = useRef(0);
 
@@ -154,6 +164,10 @@ export default function Home() {
   }
 
   const selected = scene?.entities.find((e) => e.id === selectedId) ?? null;
+  const bounds = useMemo(() => (scene ? computeBounds(scene, viewer.space) : null), [scene, viewer.space]);
+  // Functional update so quick successive changes compose; persistence follows state, not events.
+  const updateViewer = (patch: Partial<ViewerSettings>) => setViewer((v) => ({ ...v, ...patch }));
+  useEffect(() => saveViewerSettings(viewer), [viewer]);
   const currentCam = scene ? cameraAt(scene, t) : null;
   const conflicts = limitConflicts(limits);
   // Only stringify when the JSON tab is open, and not on every playback frame.
@@ -247,8 +261,16 @@ export default function Home() {
 
         <div className="flex flex-col gap-2">
           <div className="h-72 overflow-hidden rounded border border-white/15 lg:h-[28rem]">
-            {scene ? (
-              <SceneViewer scene={scene} t={t} selectedId={selectedId} onSelect={setSelectedId} viewMode={viewMode} />
+            {scene && bounds ? (
+              <SceneViewer
+                scene={scene}
+                t={t}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                viewMode={viewMode}
+                settings={viewer}
+                bounds={bounds}
+              />
             ) : (
               <div className="flex h-full items-center justify-center text-sm text-white/50">
                 Your 3D scene appears here
@@ -286,6 +308,76 @@ export default function Home() {
                 {viewMode === "orbit" ? "View: free" : "View: camera"}
               </button>
             </div>
+          )}
+          {scene && (
+            <details className="rounded border border-white/15 p-2 text-xs">
+              <summary className="cursor-pointer text-white/80">
+                View settings
+                <span className="ml-2 text-white/40">
+                  {viewer.movement} · {viewer.boundaries ? "bounded" : "unbounded"}
+                </span>
+              </summary>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <Setting label="Movement">
+                  <Segmented
+                    value={viewer.movement}
+                    onChange={(movement) => updateViewer({ movement })}
+                    options={[
+                      ["orbit", "Orbit"],
+                      ["walk", "Walk"],
+                      ["fly", "Fly"],
+                    ]}
+                  />
+                </Setting>
+                <Setting label="Speed (walk and fly)">
+                  <Segmented
+                    value={viewer.speed}
+                    onChange={(speed) => updateViewer({ speed })}
+                    options={[
+                      ["slow", "Slow"],
+                      ["normal", "Normal"],
+                      ["fast", "Fast"],
+                    ]}
+                  />
+                </Setting>
+                <Setting label="Space around the scene">
+                  <Segmented
+                    value={viewer.space}
+                    onChange={(space) => updateViewer({ space })}
+                    options={[
+                      ["tight", "Tight"],
+                      ["auto", "Auto"],
+                      ["wide", "Wide"],
+                    ]}
+                  />
+                </Setting>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-1.5" title="Keep the camera inside the scene's space">
+                    <input
+                      type="checkbox"
+                      checked={viewer.boundaries}
+                      onChange={(e) => updateViewer({ boundaries: e.target.checked })}
+                    />
+                    Boundaries
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <input type="checkbox" checked={viewer.grid} onChange={(e) => updateViewer({ grid: e.target.checked })} />
+                    Grid
+                  </label>
+                  <button
+                    onClick={() => updateViewer(DEFAULT_VIEWER_SETTINGS)}
+                    className="ml-auto text-white/50 underline"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+            </details>
+          )}
+          {scene && (
+            <p className="text-xs text-white/40">
+              {viewMode === "orbit" ? NAV_HINTS[viewer.movement] : "Camera view follows the scripted camera. Switch to free view to move around."}
+            </p>
           )}
           {scene && currentBeat && (
             <p className="text-xs text-white/60">
@@ -433,6 +525,40 @@ export default function Home() {
         </section>
       )}
     </main>
+  );
+}
+
+function Setting({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-white/50">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: [T, string][];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="inline-flex self-start overflow-hidden rounded border border-white/15">
+      {options.map(([v, label]) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          aria-pressed={value === v}
+          className={`px-3 py-1 ${value === v ? "bg-white/20" : "hover:bg-white/10"}`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   );
 }
 

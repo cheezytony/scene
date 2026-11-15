@@ -10,6 +10,17 @@ npm install
 npm run dev
 ```
 
+## Viewer
+
+Rendering uses three.js (MIT) through react-three-fiber. Orbit and camera views only draw when something changes; walk and fly draw every frame.
+
+**View settings** (saved in your browser, safe defaults if missing or from another version):
+
+- **Movement:** Orbit (default), Walk (first person at eye height), Fly (free first person). Click the view, drag to look, WASD or arrows to move, Shift to sprint, Space / C to rise and sink while flying.
+- **Speed:** Slow, Normal, Fast. Scaled a little for large scenes.
+- **Space around the scene:** Tight, Auto (default), Wide. The space is computed from everything the scene uses (entities, their sizes, every camera setup) plus room around it, with a minimum so tiny scenes still have space.
+- **Boundaries** (on by default): keeps the camera and its focus point inside that space and above the floor so you can't drift away. Turn off for unrestricted movement. **Grid** toggles the floor grid.
+
 ## Scene file format and versioning
 
 **Export JSON** writes the scene with a `schemaVersion`; **Import JSON** loads it, upgrading older files automatically (files with no `schemaVersion` are treated as v1). Files from a newer format than the app supports are rejected with a message instead of being misread.
