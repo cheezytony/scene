@@ -88,15 +88,34 @@ export const Camera = z.object({
   note: z.string(),
 });
 
-export const SceneSchema = z.object({
+/**
+ * The scene is generated in stages. The API compiles each structured-output schema into a grammar
+ * with a size limit, and the whole scene in one schema exceeds it. Each stage schema below is a
+ * slice of the scene, and SceneSchema is exactly their concatenation (same fields, same order), so
+ * the file format is unchanged. Add new fields to the stage they belong to, and run
+ * `npm run check:schemas` to confirm the API still accepts every stage.
+ */
+export const OutlineSchema = z.object({
   title: z.string(),
   logline: z.string(),
   durationSec: z.number(),
   timeline: z.array(Beat),
   transcript: z.array(TranscriptLine),
+});
+
+export const CastSchema = z.object({
   entities: z.array(Entity),
+});
+
+export const MotionSchema = z.object({
   keyframes: z.array(Keyframe),
   cameras: z.array(Camera),
+});
+
+export const SceneSchema = z.object({
+  ...OutlineSchema.shape,
+  ...CastSchema.shape,
+  ...MotionSchema.shape,
 });
 
 export type Vec3 = z.infer<typeof Vec3>;

@@ -10,6 +10,14 @@ npm install
 npm run dev
 ```
 
+## How generation works
+
+`lib/pipeline.ts` builds the scene in three model calls, each constrained to its own small schema: **outline** (title, beats, transcript) and **cast** (entities) run in parallel, then **motion** (keyframes and cameras) runs with both as context. The API compiles each structured-output schema into a grammar with a size limit, and the whole scene in one schema is over it (`The compiled grammar is too large`). The scene file format and the `/api/analyze` response are the same as a single call would give.
+
+Scene limits are enforced where they are decided, each with one repair pass that regenerates only that stage: counts at the cast stage, attached/in/on limits at the motion stage.
+
+When you add or change scene fields (`lib/schema.ts`), put them in the stage they belong to, then run `npm run check:schemas`. It asks the API to compile every stage schema (16 output tokens each, so it costs next to nothing) and fails if one is too large; split that stage if so.
+
 ## Viewer
 
 Rendering uses three.js (MIT) through react-three-fiber. Orbit and camera views only draw when something changes; walk and fly draw every frame.

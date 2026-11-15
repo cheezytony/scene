@@ -1,9 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
-import { SceneSchema, normalizeScene, type Scene } from "@/lib/schema";
-import { SYSTEM_PROMPT } from "@/lib/prompt";
-import { DEFAULT_LIMITS, LimitsSchema, checkLimits, describeLimits, limitConflicts } from "@/lib/limits";
+import { DEFAULT_LIMITS, LimitsSchema, limitConflicts } from "@/lib/limits";
+import { STAGES, analyzeScript, type RunStage } from "@/lib/pipeline";
 import { guard } from "@/lib/guard";
 
 export const maxDuration = 300;
@@ -25,14 +24,16 @@ class UserFacingError extends Error {
   }
 }
 
-async function generate(messages: Anthropic.MessageParam[]) {
+/** One model call for one pipeline stage, constrained to that stage's schema. */
+const run: RunStage = async ({ stage, system, messages }) => {
+  const { schema, effort, maxTokens } = STAGES[stage];
   const stream = client.messages.stream({
     model: "claude-opus-5-5",
-    max_tokens: 64000,
+    max_tokens: maxTokens,
     thinking: { type: "adaptive" },
-    output_config: { effort: "high", format: zodOutputFormat(SceneSchema) },
-    system: SYSTEM_PROMPT,
-    messages,
+    output_config: { effort, format: zodOutputFormat(schema) },
+    system,
+    messages: messages as Anthropic.MessageParam[],
   });
   const message = await stream.finalMessage();
 
@@ -47,15 +48,18 @@ async function generate(messages: Anthropic.MessageParam[]) {
   }
   const text = message.content.find((b) => b.type === "text");
   if (!text || text.type !== "text") throw new UserFacingError("Model returned no content.", 502);
-  const scene = normalizeScene(SceneSchema.parse(JSON.parse(text.text)));
-  return { message, scene };
-}
+  return {
+    text: text.text,
+    assistantContent: message.content,
+    usage: { input_tokens: message.usage.input_tokens, output_tokens: message.usage.output_tokens },
+  };
+};
 
 export async function POST(req: Request) {
   const denied = guard(req);
   if (denied) return denied;
 
-  const parsed =BodySchema.safeParse(await req.json().catch(() => null));
+  const parsed = BodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
     return Response.json({ error: "Body must be JSON: { script: string, limits?: Limits }" }, { status: 400 });
   }
@@ -74,48 +78,8 @@ export async function POST(req: Request) {
   }
 
   try {
-    const limitText = describeLimits(limits);
-    const messages: Anthropic.MessageParam[] = [
-      { role: "user", content: `<script>\n${script}\n</script>${limitText ? `\n\n${limitText}` : ""}` },
-    ];
-
-    const first = await generate(messages);
-    let scene: Scene = first.scene;
-    let usage = {
-      input_tokens: first.message.usage.input_tokens,
-      output_tokens: first.message.usage.output_tokens,
-    };
-    let violations = checkLimits(scene, limits);
-    let retried = false;
-
-    if (violations.length) {
-      // One repair pass: show the model its own output plus the exact violations.
-      retried = true;
-      try {
-        const second = await generate([
-          ...messages,
-          { role: "assistant", content: first.message.content },
-          {
-            role: "user",
-            content: `Your breakdown breaks these limits:\n${violations.map((v) => `- ${v}`).join("\n")}\n\nReturn the full corrected breakdown. Keep everything else consistent: remove dropped entities from keyframes and cameras, and keep transcript, beats and camera setups coherent.`,
-          },
-        ]);
-        // Bill both calls, but only keep the repair if it is no worse than the original.
-        usage = {
-          input_tokens: usage.input_tokens + second.message.usage.input_tokens,
-          output_tokens: usage.output_tokens + second.message.usage.output_tokens,
-        };
-        const repairedViolations = checkLimits(second.scene, limits);
-        if (repairedViolations.length <= violations.length) {
-          scene = second.scene;
-          violations = repairedViolations;
-        }
-      } catch (error) {
-        console.error("Repair pass failed, returning first result", error);
-      }
-    }
-
-    return Response.json({ scene, violations, retried, usage });
+    // Same response shape as before the pipeline was split into stages.
+    return Response.json(await analyzeScript({ script, limits, run }));
   } catch (error) {
     if (error instanceof UserFacingError) {
       return Response.json({ error: error.message }, { status: error.status });

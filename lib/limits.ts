@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Scene } from "./schema";
+import type { Entity, Scene } from "./schema";
 import { activeKeyframe, keyframesFor } from "./resolve";
 
 const Limit = z.number().int().nonnegative().nullable(); // null = no limit
@@ -58,17 +58,27 @@ export function describeLimits(l: Limits): string {
     : "";
 }
 
-/** Returns human-readable violations (empty when the scene respects the limits). */
-export function checkLimits(scene: Scene, l: Limits): string[] {
+/** Limits that depend only on the entity list (known after the cast stage). */
+export function checkCounts(entities: Entity[], l: Limits): string[] {
   const out: string[] = [];
-  const chars = scene.entities.filter((e) => e.kind === "character").length;
-  const objs = scene.entities.length - chars;
+  const chars = entities.filter((e) => e.kind === "character").length;
+  const objs = entities.length - chars;
   if (l.maxCharacters !== null && chars > l.maxCharacters) out.push(`${chars} characters; max is ${l.maxCharacters}.`);
   if (l.minObjects !== null && objs < l.minObjects) out.push(`${objs} objects; min is ${l.minObjects}.`);
   if (l.maxObjects !== null && objs > l.maxObjects) out.push(`${objs} objects; max is ${l.maxObjects}.`);
-  if (l.maxTotal !== null && scene.entities.length > l.maxTotal)
-    out.push(`${scene.entities.length} objects plus characters; max is ${l.maxTotal}.`);
+  if (l.maxTotal !== null && entities.length > l.maxTotal)
+    out.push(`${entities.length} objects plus characters; max is ${l.maxTotal}.`);
+  return out;
+}
 
+/** Returns human-readable violations (empty when the scene respects the limits). */
+export function checkLimits(scene: Scene, l: Limits): string[] {
+  return [...checkCounts(scene.entities, l), ...checkRelations(scene, l)];
+}
+
+/** Limits on what is attached to / in / on what, evaluated at every keyframe time. */
+export function checkRelations(scene: Scene, l: Limits): string[] {
+  const out: string[] = [];
   const kind = new Map(scene.entities.map((e) => [e.id, e.kind]));
   const times = [...new Set(scene.keyframes.map((k) => k.t))].sort((a, b) => a - b);
   const seen = new Set<string>();
