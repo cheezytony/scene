@@ -3,8 +3,8 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Control, Scene } from "@/lib/schema";
-import { activeKeyframe, cameraAt, keyframesFor, poseAt } from "@/lib/resolve";
-import { DEFAULT_LIMITS, LIMIT_FIELDS, type Limits } from "@/lib/limits";
+import { activeKeyframe, cameraAt, keyframesFor, variationsAt, worldPose } from "@/lib/resolve";
+import { DEFAULT_LIMITS, LIMIT_FIELDS, limitConflicts, type Limits } from "@/lib/limits";
 import { SAMPLE_SCRIPT } from "@/lib/sample";
 
 const SceneViewer = dynamic(() => import("@/components/SceneViewer"), { ssr: false });
@@ -25,6 +25,7 @@ export default function Home() {
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [violations, setViolations] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<"orbit" | "shot">("orbit");
+  const [accessCode, setAccessCode] = useState("");
   const tRef = useRef(0);
 
   const seek = useCallback((n: number) => {
@@ -57,13 +58,28 @@ export default function Home() {
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(accessCode ? { "x-access-code": accessCode } : {}) },
         body: JSON.stringify({ script, limits }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+      // Platform errors (timeouts, body limits) are not JSON, so parse defensively.
+      let data: { scene?: Scene; violations?: string[]; error?: string } | null = null;
+      try {
+        data = JSON.parse(await res.text());
+      } catch {}
+      if (!res.ok) {
+        throw new Error(
+          data?.error ??
+            (res.status === 504 || res.status === 408
+              ? "The request timed out. Try a shorter excerpt."
+              : res.status === 413
+                ? "The script is too large for the server."
+                : `Server error (${res.status}).`),
+        );
+      }
+      if (!data?.scene) throw new Error("Unexpected response from the server.");
       setScene(data.scene);
       setViolations(data.violations ?? []);
+      setViewMode("orbit");
       setSelectedId(data.scene.entities[0]?.id ?? null);
       seek(0);
     } catch (e) {
@@ -107,6 +123,9 @@ export default function Home() {
 
   const selected = scene?.entities.find((e) => e.id === selectedId) ?? null;
   const currentCam = scene ? cameraAt(scene, t) : null;
+  const conflicts = limitConflicts(limits);
+  // Only stringify when the JSON tab is open, and not on every playback frame.
+  const jsonText = useMemo(() => (scene && tab === "json" ? JSON.stringify(scene, null, 2) : ""), [scene, tab]);
   const currentBeat =scene?.timeline.find((b) => t >= b.startSec && t < b.endSec) ?? scene?.timeline.at(-1);
 
   return (
@@ -146,14 +165,27 @@ export default function Home() {
                   />
                 </label>
               ))}
+              {conflicts.map((c) => (
+                <p key={c} className="text-amber-300">
+                  {c}
+                </p>
+              ))}
               <button onClick={() => setLimits(DEFAULT_LIMITS)} className="self-start text-white/50 underline">
                 Reset to defaults
               </button>
             </div>
           </details>
+          <input
+            type="password"
+            value={accessCode}
+            onChange={(e) => setAccessCode(e.target.value)}
+            placeholder="Access code (if the server requires one)"
+            autoComplete="off"
+            className="rounded border border-white/15 bg-white/5 px-3 py-1.5 text-xs"
+          />
           <button
             onClick={analyze}
-            disabled={loading || script.trim().length < 20}
+            disabled={loading || script.trim().length < 20 || conflicts.length > 0}
             className="rounded bg-indigo-500 px-4 py-2 text-sm font-medium disabled:opacity-50"
           >
             {loading ? "Analyzing script… (can take a minute or two)" : "Generate scene breakdown"}
@@ -343,7 +375,7 @@ export default function Home() {
             )}
 
             {tab === "json" && (
-              <pre className="whitespace-pre-wrap break-all text-xs text-white/80">{JSON.stringify(scene, null, 2)}</pre>
+              <pre className="whitespace-pre-wrap break-all text-xs text-white/80">{jsonText}</pre>
             )}
           </div>
         </section>
@@ -366,13 +398,15 @@ function Inspector({
   onChange: (entityId: string, key: string, value: string) => void;
 }) {
   const entity = scene.entities.find((e) => e.id === entityId)!;
-  const pose = useMemo(() => poseAt(scene, entity, t), [scene, entity, t]);
+  const pose = useMemo(() => worldPose(scene, entity, t), [scene, entity, t]);
+  const vars = useMemo(() => variationsAt(scene, entity, t), [scene, entity, t]);
   const kfs = keyframesFor(scene, entityId);
   const r = (n: number) => n.toFixed(2);
 
   return (
     <div className="flex flex-col gap-3">
       <p className="text-white/80">{entity.description}</p>
+      {!pose && <p className="text-xs text-white/50">Not in the scene at {fmt(t)}.</p>}
       {pose && (
         <div className="grid grid-cols-2 gap-2 text-xs text-white/70 sm:grid-cols-4">
           <div>state: <b className="text-white">{pose.state.replaceAll("_", " ")}</b></div>
@@ -395,7 +429,7 @@ function Inspector({
             <ControlInput
               key={c.key}
               control={c}
-              value={pose?.variations[c.key] ?? c.defaultValue}
+              value={vars[c.key] ?? c.defaultValue}
               onChange={(v) => onChange(entityId, c.key, v)}
             />
           ))}

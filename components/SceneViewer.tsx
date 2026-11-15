@@ -5,7 +5,7 @@ import * as THREE from "three";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import type { Entity, Scene } from "@/lib/schema";
-import { cameraAt, poseAt } from "@/lib/resolve";
+import { cameraAt, worldPose } from "@/lib/resolve";
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const rad = (deg: number) => (deg * Math.PI) / 180;
@@ -59,8 +59,7 @@ function Actor({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const pose = poseAt(scene, entity, t);
-  if (!pose) return null;
+  const pose = worldPose(scene, entity, t);  if (!pose) return null;
   const { x: w, y: h, z: d } = entity.size;
   const color = HEX.test(entity.color) ? entity.color : "#8892a6";
   const mat = (
@@ -150,6 +149,20 @@ function CameraRig({ scene, t }: { scene: Scene; t: number }) {
   return null;
 }
 
+const FREE_VIEW_FOV = 45;
+
+/** Restores the free-view field of view after the camera rig has changed it. */
+function FovReset() {
+  useFrame(({ camera }) => {
+    const cam = camera as THREE.PerspectiveCamera;
+    if (cam.fov !== FREE_VIEW_FOV) {
+      cam.fov = FREE_VIEW_FOV;
+      cam.updateProjectionMatrix();
+    }
+  });
+  return null;
+}
+
 /** Small camera props at each setup so you can see coverage from the free view. */
 function CameraMarkers({ scene, t }: { scene: Scene; t: number }) {
   const active = cameraAt(scene, t)?.camera.id;
@@ -190,7 +203,7 @@ export default function SceneViewer({
 }) {
   const shot = viewMode === "shot" && scene.cameras.length > 0;
   return (
-    <Canvas camera={{ position: [8, 6, 10], fov: 45 }} onPointerMissed={() => onSelect(null)}>
+    <Canvas camera={{ position: [8, 6, 10], fov: FREE_VIEW_FOV }} onPointerMissed={() => onSelect(null)}>
       <color attach="background" args={["#0e1117"]} />
       <ambientLight intensity={0.8} />
       <directionalLight position={[6, 10, 4]} intensity={1.6} />
@@ -217,6 +230,7 @@ export default function SceneViewer({
         <CameraRig scene={scene} t={t} />
       ) : (
         <>
+          <FovReset />
           <CameraMarkers scene={scene} t={t} />
           <OrbitControls makeDefault target={[0, 1, 0]} maxPolarAngle={Math.PI / 2.05} />
         </>

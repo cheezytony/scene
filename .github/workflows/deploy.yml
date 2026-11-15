@@ -30,8 +30,12 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      # No secrets needed: the Anthropic client only reads credentials when a request is made.
-      - run: npm run build
+      # Same-repo runs get their build from the deploy job (`vercel build`), so only fork PRs,
+      # which never deploy, build here. No secrets needed: the Anthropic client only reads
+      # credentials when a request is made.
+      - name: Build (fork PRs only)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: npm run build
 
   deploy:
     needs: check

@@ -32,6 +32,16 @@ export const LIMIT_FIELDS: { key: keyof Limits; label: string; hint: string }[] 
   { key: "maxTotal", label: "Max objects + people", hint: "Objects plus characters in the scene" },
 ];
 
+/** Limits that can never be satisfied together. */
+export function limitConflicts(l: Limits): string[] {
+  const out: string[] = [];
+  if (l.minObjects !== null && l.maxObjects !== null && l.minObjects > l.maxObjects)
+    out.push("Min objects is greater than max objects.");
+  if (l.minObjects !== null && l.maxTotal !== null && l.minObjects > l.maxTotal)
+    out.push("Min objects is greater than max objects + people.");
+  return out;
+}
+
 /** Plain-language limits for the prompt. */
 export function describeLimits(l: Limits): string {
   const rules: string[] = [];
@@ -68,7 +78,7 @@ export function checkLimits(scene: Scene, l: Limits): string[] {
     for (const e of scene.entities) {
       const kfs = keyframesFor(scene, e.id).filter((k) => k.t <= T);
       const kf = kfs.length ? activeKeyframe(kfs, T) : undefined;
-      if (!kf || kf.relation === "none" || !kf.parentId) continue;
+      if (!kf || !kf.present || kf.relation === "none" || !kf.parentId) continue;
       if ((kf.relation === "attached" || kf.relation === "in") && e.kind === "object")
         attached.set(kf.parentId, (attached.get(kf.parentId) ?? 0) + 1);
       if (kf.relation === "in" || kf.relation === "on") occupants.set(kf.parentId, (occupants.get(kf.parentId) ?? 0) + 1);

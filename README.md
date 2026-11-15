@@ -18,7 +18,7 @@ One-time setup:
 
 1. Create the Vercel project: run `npx vercel link` locally, then read `orgId` and `projectId` from `.vercel/project.json`.
 2. Add GitHub repository secrets: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.
-3. In the Vercel project settings, add `ANTHROPIC_API_KEY` (Production and Preview). The key lives in Vercel, not GitHub.
+3. In the Vercel project settings, add `ANTHROPIC_API_KEY` and `APP_ACCESS_CODE` (Production and Preview). They live in Vercel, not GitHub. In production the API refuses all requests unless `APP_ACCESS_CODE` is set, and callers must send it (the UI has an access code field), because each analysis is an expensive Opus call. There is also a best-effort per-IP limit (6 requests per 10 minutes per server instance); add a platform-level rate limit such as the Vercel Firewall for a hard cap.
 4. Function duration: `maxDuration` in `app/api/analyze/route.ts` is 300 s because a full breakdown can take minutes. Check your Vercel plan allows that, or lower it and use shorter excerpts.
 
 ## TODO: move to AWS

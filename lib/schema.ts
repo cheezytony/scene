@@ -41,6 +41,9 @@ export const Keyframe = z.object({
   position: Vec3,
   rotationY: z.number(),
   state: z.string().describe("short snake_case state, e.g. seated, running, door_open"),
+  present: z
+    .boolean()
+    .describe("false when the entity is not in the scene from this keyframe on (it has left or not yet arrived)"),
   relation: z
     .enum(["none", "attached", "in", "on"])
     .describe("relation to parentId at this moment: attached to, inside, or resting/standing on it"),

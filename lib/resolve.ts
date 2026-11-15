@@ -17,8 +17,37 @@ const lerpAngle = (a: number, b: number, k: number) => {
   return a + d * k;
 };
 
+// Keyframes grouped by entity, cached per keyframes array (edits replace the array, so the cache
+// invalidates itself). Assumes scene.keyframes is sorted by t, which normalizeScene guarantees.
+const byEntity = new WeakMap<Keyframe[], Map<string, Keyframe[]>>();
+
 export function keyframesFor(scene: Scene, entityId: string): Keyframe[] {
-  return scene.keyframes.filter((k) => k.entityId === entityId);
+  let groups = byEntity.get(scene.keyframes);
+  if (!groups) {
+    groups = new Map();
+    for (const k of scene.keyframes) {
+      const list = groups.get(k.entityId);
+      if (list) list.push(k);
+      else groups.set(k.entityId, [k]);
+    }
+    byEntity.set(scene.keyframes, groups);
+  }
+  return groups.get(entityId) ?? [];
+}
+
+/**
+ * Control values at time t. Variations carry forward: each keyframe overrides only the keys it
+ * lists. Before the first keyframe, the first keyframe's values are shown (nothing is rendered then).
+ */
+export function variationsAt(scene: Scene, entity: Entity, t: number): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (const c of entity.controls) vars[c.key] = c.defaultValue;
+  const kfs = keyframesFor(scene, entity.id);
+  for (const k of kfs) {
+    if (k.t > t && k !== kfs[0]) break;
+    for (const v of k.variations) vars[v.key] = v.value;
+  }
+  return vars;
 }
 
 export function activeKeyframe(kfs: Keyframe[], t: number): Keyframe | undefined {
@@ -27,16 +56,18 @@ export function activeKeyframe(kfs: Keyframe[], t: number): Keyframe | undefined
   return found ?? kfs[0];
 }
 
-/** Interpolated pose of an entity at time t. Returns null if it has no keyframes. */
+/**
+ * Interpolated pose of an entity at time t, ignoring parents. Returns null when the entity is not
+ * in the scene: before its first keyframe, or after a keyframe with present = false.
+ */
 export function poseAt(scene: Scene, entity: Entity, t: number): Pose | null {
   const kfs = keyframesFor(scene, entity.id);
-  if (!kfs.length) return null;
+  if (!kfs.length || kfs[0].t > t) return null;
   const prev = activeKeyframe(kfs, t)!;
+  if (!prev.present) return null;
   const next = kfs.find((k) => k.t > t);
-  const vars: Record<string, string> = {};
-  for (const c of entity.controls) vars[c.key] = c.defaultValue;
-  for (const v of prev.variations) vars[v.key] = v.value;
-  if (!next || prev.t > t || next.t === prev.t) {
+  const vars = variationsAt(scene, entity, t);
+  if (!next || !next.present || next.t === prev.t) {
     return {
       position: prev.position,
       rotationY: prev.rotationY,
@@ -60,6 +91,29 @@ export function poseAt(scene: Scene, entity: Entity, t: number): Pose | null {
     relation: prev.relation,
     parentId: prev.parentId,
     keyframeId: prev.id,
+  };
+}
+
+/**
+ * Pose in world space. An entity that is attached to / in / on another follows it: its position is
+ * the parent's current position plus the offset recorded at its own keyframe (translation only).
+ */
+export function worldPose(scene: Scene, entity: Entity, t: number, depth = 0): Pose | null {
+  const pose = poseAt(scene, entity, t);
+  if (!pose || pose.relation === "none" || depth >= 4) return pose;
+  const parent = scene.entities.find((e) => e.id === pose.parentId);
+  const kf = keyframesFor(scene, entity.id).find((k) => k.id === pose.keyframeId);
+  if (!parent || !kf) return pose;
+  const parentNow = worldPose(scene, parent, t, depth + 1);
+  const parentThen = worldPose(scene, parent, kf.t, depth + 1);
+  if (!parentNow || !parentThen) return pose;
+  return {
+    ...pose,
+    position: {
+      x: parentNow.position.x + kf.position.x - parentThen.position.x,
+      y: parentNow.position.y + kf.position.y - parentThen.position.y,
+      z: parentNow.position.z + kf.position.z - parentThen.position.z,
+    },
   };
 }
 

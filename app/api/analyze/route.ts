@@ -3,7 +3,8 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { SceneSchema, normalizeScene, type Scene } from "@/lib/schema";
 import { SYSTEM_PROMPT } from "@/lib/prompt";
-import { DEFAULT_LIMITS, LimitsSchema, checkLimits, describeLimits } from "@/lib/limits";
+import { DEFAULT_LIMITS, LimitsSchema, checkLimits, describeLimits, limitConflicts } from "@/lib/limits";
+import { guard } from "@/lib/guard";
 
 export const maxDuration = 300;
 
@@ -51,12 +52,17 @@ async function generate(messages: Anthropic.MessageParam[]) {
 }
 
 export async function POST(req: Request) {
-  const parsed = BodySchema.safeParse(await req.json().catch(() => null));
+  const denied = guard(req);
+  if (denied) return denied;
+
+  const parsed =BodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
     return Response.json({ error: "Body must be JSON: { script: string, limits?: Limits }" }, { status: 400 });
   }
   const { script } = parsed.data;
   const limits = parsed.data.limits ?? DEFAULT_LIMITS;
+  const conflicts = limitConflicts(limits);
+  if (conflicts.length) return Response.json({ error: conflicts.join(" ") }, { status: 400 });
   if (script.trim().length < 20) {
     return Response.json({ error: "Provide a script of at least a few lines." }, { status: 400 });
   }
@@ -75,7 +81,10 @@ export async function POST(req: Request) {
 
     const first = await generate(messages);
     let scene: Scene = first.scene;
-    let usage = first.message.usage;
+    let usage = {
+      input_tokens: first.message.usage.input_tokens,
+      output_tokens: first.message.usage.output_tokens,
+    };
     let violations = checkLimits(scene, limits);
     let retried = false;
 
@@ -91,9 +100,16 @@ export async function POST(req: Request) {
             content: `Your breakdown breaks these limits:\n${violations.map((v) => `- ${v}`).join("\n")}\n\nReturn the full corrected breakdown. Keep everything else consistent: remove dropped entities from keyframes and cameras, and keep transcript, beats and camera setups coherent.`,
           },
         ]);
-        scene = second.scene;
-        usage = second.message.usage;
-        violations = checkLimits(scene, limits);
+        // Bill both calls, but only keep the repair if it is no worse than the original.
+        usage = {
+          input_tokens: usage.input_tokens + second.message.usage.input_tokens,
+          output_tokens: usage.output_tokens + second.message.usage.output_tokens,
+        };
+        const repairedViolations = checkLimits(second.scene, limits);
+        if (repairedViolations.length <= violations.length) {
+          scene = second.scene;
+          violations = repairedViolations;
+        }
       } catch (error) {
         console.error("Repair pass failed, returning first result", error);
       }
