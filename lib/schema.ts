@@ -100,6 +100,10 @@ export const OutlineSchema = z.object({
   logline: z.string(),
   durationSec: z.number(),
   timeline: z.array(Beat),
+});
+
+/** Split from the outline so it can be written while the (much slower) motion stage is running. */
+export const TranscriptSchema = z.object({
   transcript: z.array(TranscriptLine),
 });
 
@@ -131,6 +135,7 @@ export const MotionSchema = z.object({
 
 export const SceneSchema = z.object({
   ...OutlineSchema.shape,
+  ...TranscriptSchema.shape,
   ...CastSchema.shape,
   ...MotionSchema.shape,
 });

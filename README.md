@@ -12,7 +12,7 @@ npm run dev
 
 ## How generation works
 
-`lib/pipeline.ts` builds the scene in three model calls, each constrained to its own small schema: **outline** (title, beats, transcript) and **cast** (entities) run in parallel, then **motion** (keyframes and cameras) runs with both as context. The API compiles each structured-output schema into a grammar with a size limit, and the whole scene in one schema is over it (`The compiled grammar is too large`). The scene file format and the `/api/analyze` response are the same as a single call would give.
+`lib/pipeline.ts` builds the scene from model calls that are each constrained to their own small schema: **outline** (title, timing, beats) and **cast** (entities and the fixed layout of each place) run in parallel; then **motion** (keyframes and cameras) runs with both as context, while the **transcript** is written alongside it. The API compiles each structured-output schema into a grammar with a size limit, and the whole scene in one schema is over it (`The compiled grammar is too large`). The scene file format and the `/api/analyze` response are the same as a single call would give.
 
 **Speed.** Motion (keyframes and cameras) is the longest stage and grows with the script, so it is split into chunks cut at place changes (long stays in one place are split every 3 beats) and the chunks run in parallel, at most 4 calls at once. Wall time follows the longest chunk instead of the whole film: the one-page sample went from 240 s to about 125 s. A short or single-place script is one chunk, as before. Parallel chunks cannot see each other, so the cast stage also decides a fixed **layout** (where each stationary entity stands in each place) that every chunk is given; each chunk also starts with a keyframe for every entity so the cuts join cleanly. The layout is a pipeline input only and is not part of the scene file.
 
@@ -21,7 +21,11 @@ The `/api/analyze` response includes `stats` (total and per-stage time, calls an
 Optional environment variables (restart after changing):
 
 - `SCENE_CHUNK_BEATS` (default 3): most beats planned in one call. Lower is faster but gives the model less continuity inside one place.
+- `SCENE_MAX_PARALLEL` (default 6, the chunk cap): most motion calls at once. Lower it if you hit rate limits; with fewer slots than chunks they run in waves and the time multiplies.
+- `SCENE_MOTION_EFFORT` (`low`, `medium` or `high`; default `high`): thinking depth for motion. Lower is faster and cheaper, at some cost to spatial care.
 - `SCENE_FAST_MODE=1`: Opus fast mode, up to 2.5x faster output at twice the token price. Off by default; not verified end to end here.
+
+**Script length.** A request must finish within the function time limit (300 s). The one-page sample takes about 125 s. A five-page, nine-location script took 384 s before the transcript was moved off the critical path and all six chunks were allowed to run at once (it ran in two waves of four then two); the improved setup has not been measured because the API account ran out of credits. Total time is roughly the outline and cast, plus the longest chunk, plus the slowest of the remaining stages, so very long scripts still need splitting by act or a background job.
 
 Parallel chunks read the shared context separately, so a run uses more input tokens (about 20% more cost for the sample) in exchange for the speedup.
 

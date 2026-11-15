@@ -14,8 +14,10 @@ Use short stable ids: beats b1, b2...; transcript lines l1...; entities e_<name>
 const TASKS: Record<StageName, string> = {
   outline: `Your stage: the outline. Produce:
 1. title, logline and durationSec. If the script has no timing, estimate screen time at roughly one minute per page (about 55 lines) and spread beats accordingly. durationSec must cover the last beat.
-2. timeline: ordered beats (scene/story segments) with start/end seconds, location, summary, mood.
-3. transcript: every line of dialogue verbatim, plus concise action/narration/sfx lines, each timed and attached to a beat. Never invent dialogue that is not in the script.`,
+2. timeline: ordered beats (scene/story segments) with start/end seconds, location, summary, mood. Use one beat per scene heading or clear change of place or action, and write each location the way the script's scene heading does.
+The transcript is written by a separate stage, so do not include it.`,
+
+  transcript: `Your stage: the transcript. The outline (title, timing and beats) is already decided and given to you; use its beat ids exactly. Produce transcript: every line of dialogue verbatim, plus concise action/narration/sfx lines, each timed within its beat's start and end seconds and attached to that beat by beatId. Never invent dialogue that is not in the script.`,
 
   cast: `Your stage: the cast. Produce entities: the important characters and the objects that matter to the story (plot-critical props, key set pieces). Skip incidental background items. For each, give a simple 3D proxy (shape, hex color, size in meters) and 2-5 controls describing the details that can vary over the film (e.g. a choice for "outfit", a slider for "injury_severity" 0-10, a toggle for "door_open"). Control keys are snake_case. Another stage will place these entities in time, so name and describe them clearly.
 

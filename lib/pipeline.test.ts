@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { analyzeScript, type RunStage, type StageName, type StageRequest } from "./pipeline";
-import { SceneSchema, CastSchema, MotionSchema, OutlineSchema } from "./schema";
+import { SceneSchema, CastSchema, MotionSchema, OutlineSchema, TranscriptSchema } from "./schema";
 import type { Limits } from "./limits";
 
 const none: Limits = {
@@ -49,12 +49,30 @@ const outline = {
 };
 const motion = (keyframes: unknown[]) => ({ keyframes, cameras: [] });
 
-/** Fake model: returns the queued JSON for each stage, in order, and records every request. */
-function fakeRun(queue: Record<StageName, (unknown | Error)[]>) {
+type Queued = unknown | Error;
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !(v instanceof Error);
+
+/**
+ * Fake model: returns the queued JSON for each stage, in order, and records every request. Tests may
+ * give `outline` with a `transcript` inside, as before; it is split into the outline and transcript stages.
+ */
+function fakeRun(queue: { outline: Queued[]; cast: Queued[]; motion: Queued[]; transcript?: Queued[] }) {
+  const queues: Record<StageName, Queued[]> = {
+    outline: queue.outline.map((o) => {
+      if (!isPlainObject(o)) return o;
+      const rest = { ...o };
+      delete rest.transcript;
+      return rest;
+    }),
+    transcript:
+      queue.transcript ?? queue.outline.map((o) => ({ transcript: isPlainObject(o) && Array.isArray(o.transcript) ? o.transcript : [] })),
+    cast: queue.cast,
+    motion: queue.motion,
+  };
   const requests: StageRequest[] = [];
   const run: RunStage = async (request) => {
     requests.push(request);
-    const next = queue[request.stage].shift();
+    const next = queues[request.stage].shift();
     if (next === undefined) throw new Error(`no queued output for ${request.stage}`);
     if (next instanceof Error) throw next;
     return {
@@ -66,12 +84,20 @@ function fakeRun(queue: Record<StageName, (unknown | Error)[]>) {
   return { run, requests };
 }
 
+const lastMotionPrompt = (requests: StageRequest[]) =>
+  String(requests.filter((r) => r.stage === "motion").at(-1)?.messages[0].content);
+
 test("stage schemas together cover exactly the scene schema", () => {
-  const stageKeys = [...Object.keys(OutlineSchema.shape), ...Object.keys(CastSchema.shape), ...Object.keys(MotionSchema.shape)];
+  const stageKeys = [
+    ...Object.keys(OutlineSchema.shape),
+    ...Object.keys(TranscriptSchema.shape),
+    ...Object.keys(CastSchema.shape),
+    ...Object.keys(MotionSchema.shape),
+  ];
   assert.deepEqual(stageKeys, Object.keys(SceneSchema.shape));
 });
 
-test("assembles the scene from three stages, with motion seeing outline and cast", async () => {
+test("assembles the scene from its stages, with motion seeing outline and cast", async () => {
   const { run, requests } = fakeRun({
     outline: [outline],
     cast: [{ entities: [entity("e_mara", "character")], layout: [] }],
@@ -84,10 +110,11 @@ test("assembles the scene from three stages, with motion seeing outline and cast
   assert.equal(result.scene.keyframes.length, 1);
   assert.deepEqual(result.violations, []);
   assert.equal(result.retried, false);
-  assert.deepEqual(result.usage, { input_tokens: 30, output_tokens: 60 });
+  assert.deepEqual(result.usage, { input_tokens: 40, output_tokens: 80 });
 
-  assert.equal(requests.at(-1)?.stage, "motion", "motion runs after outline and cast");
-  const motionPrompt = String(requests.at(-1)?.messages[0].content);
+  assert.ok(requests.some((r) => r.stage === "motion"));
+  assert.ok(requests.findIndex((r) => r.stage === "motion") > requests.findIndex((r) => r.stage === "outline"), "motion runs after the outline");
+  const motionPrompt = lastMotionPrompt(requests);
   assert.match(motionPrompt, /<outline>[\s\S]*"title":"T"/);
   assert.match(motionPrompt, /<cast>[\s\S]*e_mara/);
 });
@@ -108,7 +135,7 @@ test("a cast over the limits is repaired before motion is generated", async () =
   // Only the cast stage was repaired, and motion was built from the repaired cast.
   assert.equal(requests.filter((r) => r.stage === "cast").length, 2);
   assert.equal(requests.filter((r) => r.stage === "motion").length, 1);
-  assert.doesNotMatch(String(requests.at(-1)?.messages[0].content), /e_okafor/);
+  assert.doesNotMatch(lastMotionPrompt(requests), /e_okafor/);
   const repair = requests.filter((r) => r.stage === "cast")[1];
   assert.equal(repair.messages.length, 3, "repair is user, assistant, user");
   assert.match(String(repair.messages[2].content), /2 characters; max is 1/);
@@ -197,7 +224,7 @@ test("a film with two places plans motion as two parallel chunks and joins them"
   assert.equal(result.stats.motionChunks, 2);
   assert.equal(result.stats.stages.motion.calls, 2);
   assert.equal(result.stats.stages.outline.calls, 1);
-  assert.deepEqual(result.usage, { input_tokens: 40, output_tokens: 80 });
+  assert.deepEqual(result.usage, { input_tokens: 50, output_tokens: 100 });
 });
 
 test("chunk size can be overridden", async () => {
@@ -226,7 +253,7 @@ test("per-stage stats cover every stage and time is measured", async () => {
     motion: [motion([keyframe("k1", "e_mara")])],
   });
   const { stats } = await analyzeScript({ script: "x", limits: none, run });
-  assert.deepEqual(Object.keys(stats.stages), ["outline", "cast", "motion"]);
+  assert.deepEqual(Object.keys(stats.stages), ["outline", "transcript", "cast", "motion"]);
   assert.equal(stats.motionChunks, 1);
   assert.ok(stats.totalMs >= 0);
 });
@@ -269,7 +296,7 @@ test("an empty layout adds no layout section", async () => {
     motion: [motion([keyframe("k1", "e_mara")])],
   });
   await analyzeScript({ script: "x", limits: none, run });
-  assert.doesNotMatch(String(requests.at(-1)?.messages[0].content), /<layout>/);
+  assert.doesNotMatch(lastMotionPrompt(requests), /<layout>/);
 });
 
 test("the layout is a pipeline input only: the scene has no layout field", async () => {
@@ -280,4 +307,109 @@ test("the layout is a pipeline input only: the scene has no layout field", async
   });
   const { scene } = await analyzeScript({ script: "x", limits: none, run });
   assert.equal("layout" in scene, false);
+});
+
+/** A fake model whose calls take a little time, recording how many motion calls overlap. */
+function timedRun(handlers: Partial<Record<StageName, () => unknown>>, delayMs = 20) {
+  let active = 0;
+  let peak = 0;
+  const run: RunStage = async ({ stage }) => {
+    if (stage === "motion") {
+      active += 1;
+      peak = Math.max(peak, active);
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
+    if (stage === "motion") active -= 1;
+    const make = handlers[stage];
+    if (!make) throw new Error(`no handler for ${stage}`);
+    const out = make();
+    return { text: JSON.stringify(out), assistantContent: [], usage: { input_tokens: 1, output_tokens: 1 } };
+  };
+  return { run, peakMotion: () => peak };
+}
+
+const places = (n: number) => ({
+  ...outline,
+  durationSec: n * 10,
+  timeline: Array.from({ length: n }, (_, i) => ({
+    id: `b${i + 1}`, startSec: i * 10, endSec: (i + 1) * 10, title: `B${i + 1}`, location: `INT. PLACE ${i + 1} - DAY`, summary: "", mood: "",
+  })),
+});
+const outlineOnly: Record<string, unknown> = { ...outline };
+delete outlineOnly.transcript;
+const handlersFor = (film: ReturnType<typeof places>) => {
+  const o: Record<string, unknown> = { ...film };
+  delete o.transcript;
+  return {
+    outline: () => o,
+    transcript: () => ({ transcript: [] }),
+    cast: () => ({ entities: [entity("e_mara", "character")], layout: [] }),
+    motion: () => motion([keyframe("k1", "e_mara")]),
+  };
+};
+
+test("the transcript is written alongside motion and never holds it up", { timeout: 5000 }, async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let motionStarted = false;
+  const run: RunStage = async ({ stage }) => {
+    let out: unknown;
+    if (stage === "transcript") {
+      await gate; // does not finish until motion has already started
+      out = { transcript: [] };
+    } else if (stage === "motion") {
+      motionStarted = true;
+      release();
+      out = motion([keyframe("k1", "e_mara")]);
+    } else if (stage === "outline") out = outlineOnly;
+    else out = { entities: [entity("e_mara", "character")], layout: [] };
+    return { text: JSON.stringify(out), assistantContent: [], usage: { input_tokens: 1, output_tokens: 1 } };
+  };
+  const result = await analyzeScript({ script: "x", limits: none, run });
+  assert.equal(motionStarted, true);
+  assert.deepEqual(result.scene.transcript, []);
+});
+
+test("the transcript stage sees the outline's beats but not the cast", async () => {
+  const { run, requests } = fakeRun({
+    outline: [outline],
+    cast: [{ entities: [entity("e_mara", "character")], layout: [] }],
+    motion: [motion([keyframe("k1", "e_mara")])],
+  });
+  await analyzeScript({ script: "x", limits: none, run });
+  const prompt = String(requests.find((r) => r.stage === "transcript")?.messages[0].content);
+  assert.match(prompt, /<outline>[\s\S]*"timeline"/);
+  assert.doesNotMatch(prompt, /<cast>/);
+});
+
+test("a film's chunks all run in one wave by default", async () => {
+  const film = places(6);
+  const { run, peakMotion } = timedRun(handlersFor(film));
+  const result = await analyzeScript({ script: "x", limits: none, run });
+  assert.equal(result.stats.motionChunks, 6);
+  assert.equal(peakMotion(), 6);
+});
+
+test("maxParallel caps how many motion calls overlap", async () => {
+  const film = places(6);
+  const { run, peakMotion } = timedRun(handlersFor(film));
+  const result = await analyzeScript({ script: "x", limits: none, run, maxParallel: 2 });
+  assert.equal(result.stats.motionChunks, 6);
+  assert.equal(peakMotion(), 2);
+});
+
+test("a failed transcript fails the analysis and leaves no unhandled rejection", async () => {
+  const film = places(1);
+  const handlers = handlersFor(film);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const { run } = timedRun({ ...handlers, transcript: () => { throw new Error("transcript boom"); } });
+    await assert.rejects(analyzeScript({ script: "x", limits: none, run }), /transcript boom/);
+    await new Promise((r) => setTimeout(r, 100)); // let any stray rejection surface
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });
