@@ -1,0 +1,70 @@
+name: CI and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a production deploy that is already running.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  VERCEL_CLI_VERSION: "65.16.0"
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      # No secrets needed: the Anthropic client only reads credentials when a request is made.
+      - run: npm run build
+
+  deploy:
+    needs: check
+    # Fork PRs get no secrets, so they only run the checks above.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Pull Vercel project settings
+        env:
+          IS_PROD: ${{ github.ref == 'refs/heads/main' }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          TARGET=preview; [ "$IS_PROD" = "true" ] && TARGET=production
+          npx --yes vercel@"$VERCEL_CLI_VERSION" pull --yes --environment="$TARGET" --token="$VERCEL_TOKEN"
+      - name: Build
+        env:
+          IS_PROD: ${{ github.ref == 'refs/heads/main' }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          ARGS=""; [ "$IS_PROD" = "true" ] && ARGS="--prod"
+          npx --yes vercel@"$VERCEL_CLI_VERSION" build $ARGS --token="$VERCEL_TOKEN"
+      - name: Deploy
+        env:
+          IS_PROD: ${{ github.ref == 'refs/heads/main' }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          ARGS=""; [ "$IS_PROD" = "true" ] && ARGS="--prod"
+          URL=$(npx --yes vercel@"$VERCEL_CLI_VERSION" deploy --prebuilt $ARGS --token="$VERCEL_TOKEN")
+          echo "Deployed: $URL"
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL" >> "$GITHUB_STEP_SUMMARY"
