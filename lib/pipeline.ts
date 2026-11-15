@@ -1,13 +1,15 @@
 import type { z } from "zod";
 import {
-  CastSchema,
+  CastStageSchema,
   MotionSchema,
   OutlineSchema,
   normalizeScene,
+  type Anchor,
   type Entity,
   type Scene,
 } from "./schema";
 import { checkCounts, checkRelations, describeLimits, type Limits } from "./limits";
+import { placeKey, planChunks, type Chunk, type ChunkOptions } from "./chunks";
 import { stagePrompt } from "./prompt";
 
 export type StageName = "outline" | "cast" | "motion";
@@ -15,7 +17,7 @@ export type StageName = "outline" | "cast" | "motion";
 /** Per-stage structured-output schema and model settings. Schemas must stay small (see schema.ts). */
 export const STAGES = {
   outline: { schema: OutlineSchema, effort: "medium", maxTokens: 32000 },
-  cast: { schema: CastSchema, effort: "medium", maxTokens: 16000 },
+  cast: { schema: CastStageSchema, effort: "medium", maxTokens: 16000 },
   motion: { schema: MotionSchema, effort: "high", maxTokens: 64000 },
 } as const;
 
@@ -42,6 +44,13 @@ export interface StageResult {
 /** Runs one model call. Injected so the pipeline has no dependency on the SDK. */
 export type RunStage = (request: StageRequest) => Promise<StageResult>;
 
+export interface StageStats extends Usage {
+  /** Wall-clock time from the first call of this stage starting to the last one finishing. */
+  ms: number;
+  /** Model calls made, including repair passes and parallel chunks. */
+  calls: number;
+}
+
 export interface AnalysisResult {
   scene: Scene;
   /** Limits that could not be satisfied even after a repair pass. */
@@ -49,6 +58,60 @@ export interface AnalysisResult {
   /** True if any stage needed a repair pass. */
   retried: boolean;
   usage: Usage;
+  /** Where the time and tokens went. Additive: older clients simply ignore it. */
+  stats: { totalMs: number; motionChunks: number; stages: Record<StageName, StageStats> };
+}
+
+/** At most this many motion calls in flight at once, to stay inside API rate limits. */
+const MAX_PARALLEL_CALLS = 4;
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+type Motion = z.infer<typeof MotionSchema>;
+
+/**
+ * Joins the motion plans of consecutive chunks. Times are clamped into each chunk's range, and ids
+ * are renumbered so chunks that each started at k1 / c1 can't collide. At a chunk boundary the later
+ * chunk's keyframe sorts after the earlier one's, so it is the one in effect.
+ */
+function mergeMotion(parts: Motion[], chunks: Chunk[]): Motion {
+  const clamp = (t: number, chunk: Chunk) => Math.min(Math.max(t, chunk.startSec), chunk.endSec);
+  const keyframes = parts
+    .flatMap((m, i) => m.keyframes.map((k) => ({ ...k, t: clamp(k.t, chunks[i]) })))
+    .sort((a, b) => a.t - b.t)
+    .map((k, i) => ({ ...k, id: `k${i + 1}` }));
+  const cameras = parts
+    .flatMap((m, i) => m.cameras.map((c) => ({ ...c, t: clamp(c.t, chunks[i]) })))
+    .sort((a, b) => a.t - b.t)
+    .map((c, i) => ({ ...c, id: `c${i + 1}` }));
+  return { keyframes, cameras };
+}
+
+/**
+ * The layout entries for the places a chunk covers. If the cast stage named places differently
+ * from the outline's locations and nothing matches, fall back to the whole layout rather than none.
+ */
+function layoutNote(layout: Anchor[], beatLocations: string[]): string {
+  if (!layout.length) return "";
+  const wanted = new Set(beatLocations.map(placeKey));
+  const relevant = layout.filter((a) => wanted.has(placeKey(a.place)));
+  return `\n\n<layout>\n${JSON.stringify(relevant.length ? relevant : layout)}\n</layout>`;
+}
+
+function chunkNote(chunk: Chunk, index: number, total: number): string {
+  if (total === 1) return "";
+  return `\n\n<chunk>\nThis is part ${index + 1} of ${total}; the other parts are generated separately and joined to yours. Produce keyframes and cameras only for beats ${chunk.beatIds.join(", ")}, which cover film time ${chunk.startSec}s to ${chunk.endSec}s (use the film's own clock, not times relative to the part). At ${chunk.startSec}s give EVERY entity in the cast a keyframe: present=true with its position, or present=false if it is not in view there, so this part starts from a complete picture and joins cleanly to the previous one.\n</chunk>`;
 }
 
 const REPAIR_SUBJECT: Record<StageName, string> = {
@@ -63,18 +126,39 @@ const REPAIR_SUBJECT: Record<StageName, string> = {
  *   context. Limits are enforced where they are decided: counts at the cast stage, attach/contain
  *   limits at the motion stage, each with one repair pass that regenerates only that stage.
  */
-export async function analyzeScript(input: { script: string; limits: Limits; run: RunStage }): Promise<AnalysisResult> {
-  const { script, limits, run } = input;
+export async function analyzeScript(input: {
+  script: string;
+  limits: Limits;
+  run: RunStage;
+  /** Overrides for how motion planning is split into parallel chunks. */
+  chunking?: Partial<ChunkOptions>;
+}): Promise<AnalysisResult> {
+  const { script, limits, run, chunking } = input;
+  const startedAt = Date.now();
   const usage: Usage = { input_tokens: 0, output_tokens: 0 };
+  const spans: Record<StageName, { first: number; last: number } | null> = { outline: null, cast: null, motion: null };
+  const stages: Record<StageName, StageStats> = {
+    outline: { ms: 0, calls: 0, input_tokens: 0, output_tokens: 0 },
+    cast: { ms: 0, calls: 0, input_tokens: 0, output_tokens: 0 },
+    motion: { ms: 0, calls: 0, input_tokens: 0, output_tokens: 0 },
+  };
   let retried = false;
 
   const limitText = describeLimits(limits);
   const base = `<script>\n${script}\n</script>${limitText ? `\n\n${limitText}` : ""}`;
 
   async function call(stage: StageName, messages: StageMessage[]) {
+    const began = Date.now();
     const result = await run({ stage, system: stagePrompt(stage), messages });
+    const finished = Date.now();
+    const span = spans[stage];
+    spans[stage] = { first: Math.min(span?.first ?? began, began), last: Math.max(span?.last ?? finished, finished) };
     usage.input_tokens += result.usage.input_tokens;
     usage.output_tokens += result.usage.output_tokens;
+    const s = stages[stage];
+    s.calls += 1;
+    s.input_tokens += result.usage.input_tokens;
+    s.output_tokens += result.usage.output_tokens;
     return result;
   }
 
@@ -115,18 +199,39 @@ export async function analyzeScript(input: { script: string; limits: Limits; run
 
   const [outline, cast] = await Promise.all([
     runStage("outline", OutlineSchema, ""),
-    runStage("cast", CastSchema, "", (d) => checkCounts(d.entities, limits)),
+    runStage("cast", CastStageSchema, "", (d) => checkCounts(d.entities, limits)),
   ]);
 
   const entities: Entity[] = cast.data.entities;
   const context = `\n\n<outline>\n${JSON.stringify(outline.data)}\n</outline>\n\n<cast>\n${JSON.stringify(entities)}\n</cast>`;
-  const motion = await runStage("motion", MotionSchema, context, (d) =>
-    checkRelations(assemble(outline.data, entities, d), limits),
-  );
 
-  const scene = normalizeScene(assemble(outline.data, entities, motion.data));
-  const violations = [...new Set([...cast.issues, ...motion.issues])];
-  return { scene, violations, retried, usage };
+  // Motion is by far the longest stage and grows with the script, so it is planned per chunk (cut at
+  // place changes) and the chunks run in parallel: wall time follows the longest chunk, not the film.
+  const chunks = planChunks(outline.data.timeline, outline.data.durationSec, chunking);
+  const motionParts = await mapLimit(chunks, MAX_PARALLEL_CALLS, (chunk, i) => {
+    const locations = outline.data.timeline.filter((b) => chunk.beatIds.includes(b.id)).map((b) => b.location);
+    return runStage(
+      "motion",
+      MotionSchema,
+      context + layoutNote(cast.data.layout, locations) + chunkNote(chunk, i, chunks.length),
+      (d) => checkRelations(assemble(outline.data, entities, d), limits),
+    );
+  });
+  const motion = mergeMotion(motionParts.map((p) => p.data), chunks);
+
+  const scene = normalizeScene(assemble(outline.data, entities, motion));
+  const violations = [...new Set([...cast.issues, ...motionParts.flatMap((p) => p.issues)])];
+  for (const name of Object.keys(stages) as StageName[]) {
+    const span = spans[name];
+    stages[name].ms = span ? span.last - span.first : 0;
+  }
+  return {
+    scene,
+    violations,
+    retried,
+    usage,
+    stats: { totalMs: Date.now() - startedAt, motionChunks: chunks.length, stages },
+  };
 }
 
 function assemble(

@@ -10,6 +10,12 @@ export const maxDuration = 300;
 const MAX_SCRIPT_CHARS = 200_000;
 const client = new Anthropic(); // ANTHROPIC_API_KEY or `ant auth login` profile
 
+// Opt-in speed/cost knobs, read per request so a restart is the only thing needed to change them.
+// SCENE_FAST_MODE=1: Opus fast mode, up to 2.5x faster output at twice the token price.
+// SCENE_CHUNK_BEATS=n: most beats planned in one parallel call (default 3); lower is faster but
+// gives the model less continuity across the cuts.
+const positiveInt = (v: string | undefined) => (v && Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : undefined);
+
 const BodySchema = z.object({
   script: z.string(),
   limits: LimitsSchema.optional(),
@@ -30,6 +36,7 @@ const run: RunStage = async ({ stage, system, messages }) => {
   const stream = client.messages.stream({
     model: "claude-opus-5-5",
     max_tokens: maxTokens,
+    ...(process.env.SCENE_FAST_MODE === "1" ? { speed: "fast" as const } : {}),
     thinking: { type: "adaptive" },
     output_config: { effort, format: zodOutputFormat(schema) },
     system,
@@ -79,7 +86,8 @@ export async function POST(req: Request) {
 
   try {
     // Same response shape as before the pipeline was split into stages.
-    return Response.json(await analyzeScript({ script, limits, run }));
+    const chunking = { maxBeats: positiveInt(process.env.SCENE_CHUNK_BEATS) };
+    return Response.json(await analyzeScript({ script, limits, run, chunking }));
   } catch (error) {
     if (error instanceof UserFacingError) {
       return Response.json({ error: error.message }, { status: error.status });

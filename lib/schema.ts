@@ -107,6 +107,23 @@ export const CastSchema = z.object({
   entities: z.array(Entity),
 });
 
+/**
+ * Where something that stays put is placed in a given location. Decided once, in the cast stage,
+ * and handed to every motion chunk so parallel chunks agree on the set. It is a pipeline input,
+ * not part of the scene file, so the file format (and its version) is unaffected.
+ */
+export const Anchor = z.object({
+  entityId: z.string(),
+  place: z.string().describe("the location, in the script's own words, e.g. 'subway station'"),
+  position: Vec3,
+  rotationY: z.number(),
+});
+
+/** What the cast stage returns: the scene's entities plus the fixed layout of each place. */
+export const CastStageSchema = CastSchema.extend({
+  layout: z.array(Anchor),
+});
+
 export const MotionSchema = z.object({
   keyframes: z.array(Keyframe),
   cameras: z.array(Camera),
@@ -123,6 +140,7 @@ export type Control = z.infer<typeof Control>;
 export type Entity = z.infer<typeof Entity>;
 export type Keyframe = z.infer<typeof Keyframe>;
 export type Camera = z.infer<typeof Camera>;
+export type Anchor = z.infer<typeof Anchor>;
 export type Beat = z.infer<typeof Beat>;
 export type TranscriptLine = z.infer<typeof TranscriptLine>;
 export type Scene = z.infer<typeof SceneSchema>;
