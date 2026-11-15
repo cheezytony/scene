@@ -2,14 +2,15 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { Camera, Control, Scene } from "@/lib/schema";
+import type { Camera, Scene } from "@/lib/schema";
 import { createHistory, historyReducer } from "@/lib/history";
-import { updateCamera } from "@/lib/edit";
+import { moveCamera, updateCamera } from "@/lib/edit";
 import CameraPanel from "@/components/CameraPanel";
+import EntityPanel from "@/components/EntityPanel";
 import TimelinePanel from "@/components/TimelinePanel";
 import TranscriptPanel from "@/components/TranscriptPanel";
-import type { EditFn } from "@/components/ui";
-import { activeKeyframe, cameraAt, keyframesFor, variationsAt, worldPose } from "@/lib/resolve";
+import type { EditFn, ViewApi, ViewPose } from "@/components/ui";
+import { cameraAt } from "@/lib/resolve";
 import { DEFAULT_LIMITS, LIMIT_FIELDS, limitConflicts, type Limits } from "@/lib/limits";
 import { SCHEMA_VERSION, SceneFormatError, migrateScene, serializeScene } from "@/lib/migrate";
 import { computeBounds } from "@/lib/space";
@@ -40,6 +41,24 @@ export default function Home() {
   );
   const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
   const [cameraStep, setCameraStep] = useState(0.1);
+  const [keepDirection, setKeepDirection] = useState(true);
+  // The camera the user chose to look through, valid only at the time it was chosen: moving the
+  // playhead (or playing) goes back to the scripted cameras.
+  const [pinned, setPinned] = useState<{ id: string; t: number } | null>(null);
+  const viewApi = useRef<ViewApi | null>(null);
+  // A move requested before the 3D view finished loading, applied as soon as it is ready.
+  const pendingFocus = useRef<ViewPose | null>(null);
+  const focusView = useCallback((pose: ViewPose) => {
+    if (viewApi.current) viewApi.current.focus(pose);
+    else pendingFocus.current = pose;
+  }, []);
+  const registerView = useCallback((api: ViewApi | null) => {
+    viewApi.current = api;
+    if (api && pendingFocus.current) {
+      api.focus(pendingFocus.current);
+      pendingFocus.current = null;
+    }
+  }, []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [t, setT] = useState(0);
@@ -149,28 +168,6 @@ export default function Home() {
     }
   }
 
-  /** Edit a variation on the keyframe currently in effect for an entity. */
-  function setVariation(entityId: string, key: string, value: string) {
-    const at = tRef.current;
-    edit((s) => {
-      const kf = activeKeyframe(keyframesFor(s, entityId), at);
-      if (!kf) return s;
-      return {
-        ...s,
-        keyframes: s.keyframes.map((k) =>
-          k.id !== kf.id
-            ? k
-            : {
-                ...k,
-                variations: k.variations.some((v) => v.key === key)
-                  ? k.variations.map((v) => (v.key === key ? { ...v, value } : v))
-                  : [...k.variations, { key, value }],
-              },
-        ),
-      };
-    }, `var:${entityId}:${key}`);
-  }
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
@@ -200,7 +197,6 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
-  const selected = scene?.entities.find((e) => e.id === selectedId) ?? null;
   const bounds = useMemo(() => (scene ? computeBounds(scene, viewer.space) : null), [scene, viewer.space]);
   // Functional update so quick successive changes compose; persistence follows state, not events.
   const updateViewer = (patch: Partial<ViewerSettings>) => setViewer((v) => ({ ...v, ...patch }));
@@ -212,7 +208,26 @@ export default function Home() {
       : viewer.movement !== "orbit"
         ? { text: "Drag handles need Orbit movement (you are in walk or fly).", action: "Use Orbit", run: () => updateViewer({ movement: "orbit" }) }
         : null;
-  const currentCam = scene ? cameraAt(scene, t) : null;
+  const pinnedCamera =
+    scene && pinned && Math.abs(t - pinned.t) < 1e-6 ? (scene.cameras.find((c) => c.id === pinned.id) ?? null) : null;
+
+  /** Show the scene through exactly this camera (until the playhead moves). */
+  function lookThrough(cam: Camera) {
+    seek(cam.t);
+    setPinned({ id: cam.id, t: cam.t });
+    setViewMode("shot");
+  }
+
+  /** Choosing a camera views it: in the free view the 3D view moves to its position and direction; in camera view it is looked through. */
+  function selectCamera(id: string | null) {
+    setSelectedCameraId(id);
+    const cam = id && scene ? scene.cameras.find((c) => c.id === id) : undefined;
+    if (!cam) return;
+    if (viewMode === "shot") lookThrough(cam);
+    else focusView({ position: cam.position, lookAt: cam.lookAt });
+  }
+
+  const currentCam = scene ? (pinnedCamera ? { camera: pinnedCamera } : cameraAt(scene, t)) : null;
   const conflicts = limitConflicts(limits);
   // Only stringify when the JSON tab is open, and not on every playback frame.
   const jsonText = useMemo(() => (scene && tab === "json" ? JSON.stringify(serializeScene(scene), null, 2) : ""), [scene, tab]);
@@ -338,8 +353,14 @@ export default function Home() {
                   setTab("cameras");
                 }}
                 onCameraChange={(id, patch: Partial<Camera>) =>
-                  edit((s) => updateCamera(s, id, patch), `cam:${id}:${Object.keys(patch).join(",")}`)
+                  edit(
+                    // Dragging the camera itself moves its look-at along (when "keeps direction" is on).
+                    (s) => (patch.position && !patch.lookAt ? moveCamera(s, id, patch.position, keepDirection) : updateCamera(s, id, patch)),
+                    `cam:${id}:${Object.keys(patch).join(",")}`,
+                  )
                 }
+                pinnedCamera={pinnedCamera}
+                onViewApi={registerView}
                 editCameras={tab === "cameras"}
                 snap={cameraStep}
               />
@@ -495,26 +516,7 @@ export default function Home() {
             {tab === "transcript" && <TranscriptPanel scene={scene} t={t} onSeek={seek} edit={edit} />}
 
             {tab === "entities" && (
-              <div className="grid gap-4 md:grid-cols-[220px_1fr]">
-                <ul className="flex flex-col gap-1">
-                  {scene.entities.map((e) => (
-                    <li key={e.id}>
-                      <button
-                        onClick={() => setSelectedId(e.id)}
-                        className={`w-full rounded px-2 py-1 text-left ${
-                          e.id === selectedId ? "bg-white/15" : "hover:bg-white/5"
-                        }`}
-                      >
-                        {e.name}
-                        <span className="ml-2 text-xs text-white/40">
-                          {e.kind} · {e.importance.replaceAll("_", " ")}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                {selected && <Inspector scene={scene} entityId={selected.id} t={t} onSeek={seek} onChange={setVariation} />}
-              </div>
+              <EntityPanel scene={scene} t={t} selectedId={selectedId} onSelect={setSelectedId} onSeek={seek} edit={edit} />
             )}
 
             {tab === "cameras" && (
@@ -522,15 +524,16 @@ export default function Home() {
                 scene={scene}
                 t={t}
                 selectedId={selectedCameraId}
-                onSelect={setSelectedCameraId}
-                onLookThrough={(c) => {
-                  seek(c.t);
-                  setViewMode("shot");
-                }}
+                onSelect={selectCamera}
+                onLookThrough={lookThrough}
                 step={cameraStep}
                 onStepChange={setCameraStep}
                 edit={edit}
                 handlesNotice={handlesNotice}
+                keepDirection={keepDirection}
+                onKeepDirectionChange={setKeepDirection}
+                captureView={() => viewApi.current?.capture() ?? null}
+                focusView={focusView}
               />
             )}
 
@@ -575,118 +578,5 @@ function Segmented<T extends string>({
         </button>
       ))}
     </div>
-  );
-}
-
-function Inspector({
-  scene,
-  entityId,
-  t,
-  onSeek,
-  onChange,
-}: {
-  scene: Scene;
-  entityId: string;
-  t: number;
-  onSeek: (n: number) => void;
-  onChange: (entityId: string, key: string, value: string) => void;
-}) {
-  const entity = scene.entities.find((e) => e.id === entityId)!;
-  const pose = useMemo(() => worldPose(scene, entity, t), [scene, entity, t]);
-  const vars = useMemo(() => variationsAt(scene, entity, t), [scene, entity, t]);
-  const kfs = keyframesFor(scene, entityId);
-  const r = (n: number) => n.toFixed(2);
-
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="text-white/80">{entity.description}</p>
-      {!pose && <p className="text-xs text-white/50">Not in the scene at {fmt(t)}.</p>}
-      {pose && (
-        <div className="grid grid-cols-2 gap-2 text-xs text-white/70 sm:grid-cols-4">
-          <div>state: <b className="text-white">{pose.state.replaceAll("_", " ")}</b></div>
-          {pose.relation !== "none" && (
-            <div className="sm:col-span-4">
-              {pose.relation} <b className="text-white">{scene.entities.find((e) => e.id === pose.parentId)?.name ?? pose.parentId}</b>
-            </div>
-          )}
-          <div>x {r(pose.position.x)}</div>
-          <div>y {r(pose.position.y)}</div>
-          <div>z {r(pose.position.z)}</div>
-        </div>
-      )}
-      <div>
-        <h3 className="mb-1 text-xs uppercase text-white/50">
-          Controls <span className="normal-case">(edits apply to the keyframe in effect at {fmt(t)})</span>
-        </h3>
-        <div className="flex flex-col gap-2">
-          {entity.controls.map((c) => (
-            <ControlInput
-              key={c.key}
-              control={c}
-              value={vars[c.key] ?? c.defaultValue}
-              onChange={(v) => onChange(entityId, c.key, v)}
-            />
-          ))}
-        </div>
-      </div>
-      <div>
-        <h3 className="mb-1 text-xs uppercase text-white/50">Keyframes</h3>
-        <ul className="flex flex-wrap gap-1">
-          {kfs.map((k) => (
-            <li key={k.id}>
-              <button
-                onClick={() => onSeek(k.t)}
-                title={k.note}
-                className={`rounded border px-2 py-0.5 text-xs ${
-                  pose?.keyframeId === k.id ? "border-indigo-400" : "border-white/15 hover:bg-white/10"
-                }`}
-              >
-                {fmt(k.t)} · {k.state.replaceAll("_", " ")}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-}
-
-function ControlInput({
-  control: c,
-  value,
-  onChange,
-}: {
-  control: Control;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <label className="flex items-center gap-3 text-xs">
-      <span className="w-36 shrink-0 text-white/70">{c.label}</span>
-      {c.type === "choice" && (
-        <select value={value} onChange={(e) => onChange(e.target.value)} className="rounded border border-white/15 bg-neutral-900 px-2 py-1">
-          {[...new Set([...c.options, value])].map((o) => (
-            <option key={o}>{o}</option>
-          ))}
-        </select>
-      )}
-      {c.type === "slider" && (
-        <>
-          <input
-            type="range"
-            min={c.min}
-            max={c.max}
-            step={(c.max - c.min) / 100 || 0.1}
-            value={Number(value) || 0}
-            onChange={(e) => onChange(e.target.value)}
-            className="flex-1"
-          />
-          <span className="w-10 text-right tabular-nums">{Number(value).toFixed(1)}</span>
-        </>
-      )}
-      {c.type === "toggle" && (
-        <input type="checkbox" checked={value === "true"} onChange={(e) => onChange(String(e.target.checked))} />
-      )}
-    </label>
   );
 }

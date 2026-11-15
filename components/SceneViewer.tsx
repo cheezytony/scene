@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Grid, Line, OrbitControls, TransformControls } from "@react-three/drei";
 import type { Camera, Entity, Scene } from "@/lib/schema";
 import { cameraAt, worldPose } from "@/lib/resolve";
 import { EYE_HEIGHT, FLOOR_CLEARANCE, moveSpeed, type Bounds } from "@/lib/space";
 import type { ViewerSettings } from "@/lib/viewer-settings";
+import type { ViewApi, ViewPose } from "./ui";
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const rad = (deg: number) => (deg * Math.PI) / 180;
@@ -138,9 +139,10 @@ function Actor({
 }
 
 /** Drives the viewport camera from the scene's camera setups (shot view). */
-function CameraRig({ scene, t }: { scene: Scene; t: number }) {
+function CameraRig({ scene, t, pinned }: { scene: Scene; t: number; pinned: Camera | null }) {
   useFrame(({ camera }) => {
-    const pose = cameraAt(scene, t);
+    // A pinned camera is shown exactly; otherwise the scripted camera for this moment.
+    const pose = pinned ?? cameraAt(scene, t);
     if (!pose) return;
     const cam = camera as THREE.PerspectiveCamera;
     cam.position.set(pose.position.x, pose.position.y, pose.position.z);
@@ -152,6 +154,54 @@ function CameraRig({ scene, t }: { scene: Scene; t: number }) {
 }
 
 const FREE_VIEW_FOV = 45;
+
+const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
+
+/**
+ * Lets the page read where the viewer is looking (to record it as a camera) and move the viewer to
+ * a camera's position and direction. Moves are applied inside the frame loop, where the camera may
+ * be changed, and bump `focusNonceRef` so first-person navigation picks up the new direction.
+ */
+function ViewBridge({ onViewApi, focusNonceRef }: { onViewApi?: (api: ViewApi | null) => void; focusNonceRef: React.RefObject<number> }) {
+  const get = useThree((s) => s.get);
+  const pending = useRef<ViewPose | null>(null);
+
+  useEffect(() => {
+    if (!onViewApi) return;
+    onViewApi({
+      capture: () => {
+        const { camera, controls } = get();
+        const cam = camera as THREE.PerspectiveCamera;
+        // Orbit has an explicit focus point; otherwise use a point 6 m straight ahead.
+        const target = (controls as { target?: THREE.Vector3 } | null)?.target;
+        const look = target ?? cam.position.clone().addScaledVector(cam.getWorldDirection(new THREE.Vector3()), 6);
+        return {
+          position: { x: r4(cam.position.x), y: r4(cam.position.y), z: r4(cam.position.z) },
+          lookAt: { x: r4(look.x), y: r4(look.y), z: r4(look.z) },
+          fov: cam.fov,
+        };
+      },
+      focus: (pose) => {
+        pending.current = pose;
+        get().invalidate();
+      },
+    });
+    return () => onViewApi(null);
+  }, [get, onViewApi]);
+
+  useFrame(({ camera, controls }) => {
+    const pose = pending.current;
+    if (!pose) return;
+    pending.current = null;
+    camera.position.set(pose.position.x, pose.position.y, pose.position.z);
+    camera.lookAt(pose.lookAt.x, pose.lookAt.y, pose.lookAt.z);
+    const orbit = controls as { target?: THREE.Vector3; update?: () => void } | null;
+    orbit?.target?.set(pose.lookAt.x, pose.lookAt.y, pose.lookAt.z);
+    orbit?.update?.();
+    focusNonceRef.current += 1;
+  });
+  return null;
+}
 
 /** Restores the free-view field of view after the camera rig has changed it. */
 function FovReset() {
@@ -346,12 +396,15 @@ function FirstPersonRig({
   settings,
   bounds,
   container,
+  focusNonceRef,
 }: {
   mode: "walk" | "fly";
   settings: ViewerSettings;
   bounds: Bounds;
   /** The focusable wrapper element that receives keyboard and pointer input. */
   container: React.RefObject<HTMLDivElement | null>;
+  /** Changes when the viewer is moved from outside, so the look direction is re-read from the camera. */
+  focusNonceRef: React.RefObject<number>;
 }) {
   const box = useBoundsBox(bounds);
   const input = useRef({ keys: new Set<string>(), yaw: 0, pitch: 0, dragging: false });
@@ -400,6 +453,7 @@ function FirstPersonRig({
   }, [container]);
   const speed = moveSpeed(bounds, settings.speed);
   const adopted = useRef(false);
+  const seenFocus = useRef(0);
   const scratch = useRef({
     move: new THREE.Vector3(),
     forward: new THREE.Vector3(),
@@ -410,12 +464,13 @@ function FirstPersonRig({
   useFrame(({ camera }, delta) => {
     const inp = input.current;
     const s = scratch.current;
-    if (!adopted.current) {
-      // Start from wherever the camera is looking now, so switching modes doesn't jump.
+    if (!adopted.current || seenFocus.current !== focusNonceRef.current) {
+      // Start from wherever the camera is looking now, so switching modes (or being moved to a camera) doesn't jump.
       s.euler.setFromQuaternion(camera.quaternion, "YXZ");
       inp.yaw = s.euler.y;
       inp.pitch = s.euler.x;
       adopted.current = true;
+      seenFocus.current = focusNonceRef.current;
     }
     camera.rotation.order = "YXZ";
     camera.rotation.set(inp.pitch, inp.yaw, 0);
@@ -454,6 +509,8 @@ export default function SceneViewer({
   onCameraChange,
   editCameras = false,
   snap = 0.1,
+  pinnedCamera = null,
+  onViewApi,
 }: {
   scene: Scene;
   t: number;
@@ -469,7 +526,12 @@ export default function SceneViewer({
   /** Show drag handles on the selected camera (free orbit view only). */
   editCameras?: boolean;
   snap?: number;
+  /** In camera view, show exactly this camera instead of the one the timeline picks. */
+  pinnedCamera?: Camera | null;
+  /** Receives the viewer's read/move API once it is ready (null when it goes away). */
+  onViewApi?: (api: ViewApi | null) => void;
 }) {
+  const focusNonceRef = useRef(0);
   const shot = viewMode === "shot" && scene.cameras.length > 0;
   const firstPerson = !shot && settings.movement !== "orbit";
   const editing = editCameras && !shot && !firstPerson ? scene.cameras.find((c) => c.id === selectedCameraId) : undefined;
@@ -484,6 +546,7 @@ export default function SceneViewer({
         camera={{ position: [8, 6, 10], fov: FREE_VIEW_FOV }}
         onPointerMissed={() => onSelect(null)}
       >
+        <ViewBridge onViewApi={onViewApi} focusNonceRef={focusNonceRef} />
         <color attach="background" args={["#0e1117"]} />
         <ambientLight intensity={0.8} />
         <directionalLight position={[6, 10, 4]} intensity={1.6} />
@@ -509,7 +572,7 @@ export default function SceneViewer({
           />
         ))}
         {shot ? (
-          <CameraRig scene={scene} t={t} />
+          <CameraRig scene={scene} t={t} pinned={pinnedCamera} />
         ) : (
           <>
             <FovReset />
@@ -521,7 +584,14 @@ export default function SceneViewer({
             {settings.movement === "orbit" ? (
               <OrbitRig settings={settings} bounds={bounds} />
             ) : (
-              <FirstPersonRig key={settings.movement} mode={settings.movement} settings={settings} bounds={bounds} container={container} />
+              <FirstPersonRig
+                key={settings.movement}
+                mode={settings.movement}
+                settings={settings}
+                bounds={bounds}
+                container={container}
+                focusNonceRef={focusNonceRef}
+              />
             )}
           </>
         )}
