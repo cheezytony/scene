@@ -25,4 +25,4 @@ One-time setup:
 
 - Replace the Vercel deploy job with an AWS target (service not chosen yet: App Runner, ECS Fargate or Amplify).
 - Authenticate the workflow to AWS with GitHub OIDC (no long-lived AWS keys).
-- Decide how the running app authenticates to Anthropic: an API key in a secret store, or Workload Identity Federation. Both work with the unchanged `new Anthropic()` client.
+- Keep `ANTHROPIC_API_KEY` (and `APP_ACCESS_CODE`) in AWS Secrets Manager or SSM Parameter Store and inject them into the service. Anthropic auth stays an API key.
