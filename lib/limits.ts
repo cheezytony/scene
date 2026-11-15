@@ -24,12 +24,12 @@ export const DEFAULT_LIMITS: Limits = {
 };
 
 export const LIMIT_FIELDS: { key: keyof Limits; label: string; hint: string }[] = [
-  { key: "maxCharacters", label: "Max characters", hint: "Characters tracked in the whole breakdown" },
-  { key: "minObjects", label: "Min objects", hint: "Fewest objects (props, set pieces) in the scene" },
-  { key: "maxObjects", label: "Max objects", hint: "Most objects in the scene" },
-  { key: "maxAttachedPerObject", label: "Max attached to / in an object", hint: "Objects attached to or inside any one object, at any moment" },
-  { key: "maxOccupantsPerObject", label: "Max things in / on an object", hint: "Objects plus people in or on any one object (a car, a table), at any moment" },
-  { key: "maxTotal", label: "Max objects + people", hint: "Objects plus characters in the scene" },
+  { key: "maxCharacters", label: "Characters", hint: "The most people to follow through the story" },
+  { key: "minObjects", label: "Props, at least", hint: "So the set never feels empty" },
+  { key: "maxObjects", label: "Props, at most", hint: "Keeps the set from getting cluttered" },
+  { key: "maxAttachedPerObject", label: "Things on one thing", hint: "The most objects attached to, or inside, any single object" },
+  { key: "maxOccupantsPerObject", label: "Things in or on one thing", hint: "The most objects and people in or on any single thing, like a car or a table" },
+  { key: "maxTotal", label: "Everything together", hint: "The most characters and props in the whole scene" },
 ];
 
 /** Limits that can never be satisfied together. */

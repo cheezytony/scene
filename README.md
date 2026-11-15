@@ -10,6 +10,15 @@ npm install
 npm run dev
 ```
 
+## The four steps
+
+The app is one calm path: **Script** (paste or open a saved scene), **Settings** (a few optional limits, then create), **Preview** (look around, scrub through, edit anything), **Export**.
+
+- **Wide preview with full screen.** The stage takes the full width of the page. The full screen button (or the **F** key) uses the browser's own full screen; where that isn't available or isn't allowed (iPhone Safari, embedded views) it fills the window instead, and **Esc** leaves either. In full screen the controls tuck away when the pointer is still.
+- **Export formats** (`lib/export.ts`, pure and tested): the scene file (`.json`, reopens with everything), the transcript (`.md`, by beat with timings, also copyable), and the shot list (`.csv`, every camera with its timing, position and direction in degrees).
+- **Voice.** Copy is calm, warm and a little understated: it never shouts or blames and says what to do next. Wording that talks to you lives in `lib/voice.ts` and the step components; keep new copy in that voice.
+- **Look.** Headings use Instrument Serif (`.font-heading`), everything else Geist. The shared button, field and card styles are in `components/ui.ts`.
+
 ## How generation works
 
 `lib/pipeline.ts` builds the scene from model calls that are each constrained to their own small schema: **outline** (title, timing, beats) and **cast** (entities and the fixed layout of each place) run in parallel; then **motion** (keyframes and cameras) runs with both as context, while the **transcript** is written alongside it. The API compiles each structured-output schema into a grammar with a size limit, and the whole scene in one schema is over it (`The compiled grammar is too large`). The scene file format and the `/api/analyze` response are the same as a single call would give.
