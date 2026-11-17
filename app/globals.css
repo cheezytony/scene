@@ -1,26 +1,69 @@
 @import "tailwindcss";
 
+/* The editorial serif used for headings (loaded in layout.tsx). */
+.font-heading {
+  font-family: var(--font-instrument), "Iowan Old Style", Georgia, serif;
+  font-weight: 400;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* Deep ink with a faint cool glow above and a warm one below: calm, never flat. */
+body {
+  background:
+    radial-gradient(1100px 520px at 50% -12%, rgba(132, 146, 200, 0.12), transparent 70%),
+    radial-gradient(800px 420px at 100% 100%, rgba(214, 176, 140, 0.05), transparent 70%),
+    #0b0d12;
+  background-attachment: fixed;
+  color: #e9e6e1;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+::selection {
+  background: rgba(190, 200, 255, 0.28);
+}
+
+:focus-visible {
+  outline: 2px solid rgba(200, 210, 255, 0.6);
+  outline-offset: 2px;
+}
+
+input[type="range"] {
+  accent-color: #e9e6e1;
+}
+
+/* Screens ease in, and a quiet pulse marks work in progress. Both stand down for reduced motion. */
+/*
+ * Only the starting state is described, and the animation does not hold its end state afterwards
+ * (no `forwards`/`both`). A held transform would turn this element into the anchor for any
+ * `position: fixed` descendant, such as the viewer when it fills the window.
+ */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
   }
 }
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.rise {
+  animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+.breathe {
+  animation: breathe 2.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .breathe {
+    animation: none;
+  }
 }
