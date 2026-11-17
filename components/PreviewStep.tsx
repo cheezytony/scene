@@ -179,7 +179,7 @@ export default function PreviewStep({
           onToggleView: () => setViewMode((m) => (m === "orbit" ? "shot" : "orbit")),
           canUseCameraView: scene.cameras.length > 0,
         }}
-        hint={viewMode === "orbit" ? NAV_HINTS[viewer.movement] : "You're seeing through the scripted camera. Switch to Exploring to move around."}
+        hint={scene.entities.length === 0 ? "This scene was made without characters & props, so there is nothing to walk around in. Choose them in Settings and create it again to explore it in 3D." : viewMode === "orbit" ? NAV_HINTS[viewer.movement] : "You're seeing through the scripted camera. Switch to Exploring to move around."}
       >
         <SceneViewer
           scene={scene}

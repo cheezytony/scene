@@ -90,3 +90,13 @@ One-time setup:
 - Replace the Vercel deploy job with an AWS target (service not chosen yet: App Runner, ECS Fargate or Amplify).
 - Authenticate the workflow to AWS with GitHub OIDC (no long-lived AWS keys).
 - Keep `ANTHROPIC_API_KEY` (and `APP_ACCESS_CODE`) in AWS Secrets Manager or SSM Parameter Store and inject them into the service. Anthropic auth stays an API key.
+
+## Ideas, outputs, costs, and the movie
+
+- **Start from an idea.** The script step has an "I just have an idea" tab. It says up front that the result may be generic, writes a short script (`/api/script`), and puts it in the editable script box before anything else runs.
+- **Choose outputs.** Settings has checkboxes: Beats (always on), Transcript (on by default), Characters & props, Cameras (needs characters & props). Each maps to a pipeline stage (`lib/outputs.ts`, `analyzeScript({ outputs })`), so unchecked ones are skipped, not hidden. A request with no `outputs` still makes everything.
+- **Estimated cost before you start.** `lib/cost.ts` estimates tokens from the script length and chosen outputs and prices them in USD and NGN, as a range. The naira rate is editable (default 1500) because it moves daily. Anthropic prices are built in; for other models you enter the price, and an unknown price shows as "not counted" rather than a guess. These are planning numbers: compare against the `usage` every run returns and tune the constants.
+- **Different models for different jobs.** Previews and the movie's director use a "preview" model (Anthropic, or OpenAI/compatible via `OPENAI_API_KEY`/`OPENAI_BASE_URL`); the film uses a video provider (Google Veo via `GEMINI_API_KEY`, or Replicate via `REPLICATE_API_TOKEN`). Keys stay on the server; `/api/providers` only reports which are set. Choices are remembered in the browser.
+- **Make the movie** (step 5). You pick which outputs to feed it; more outputs means a better-informed director and more tokens. A director model writes one prompt per shot (`/api/movie/plan`), each shot is rendered by the video model (`/api/movie/start`, `/api/movie/status`), and the shots play back to back, each downloadable. Shots are one per camera setup (or per beat), capped at the model's longest clip. There is no stitching into a single file yet.
+
+**Not yet exercised against live accounts:** the OpenAI-compatible adapter and both video providers were built from their public docs and tested only with mocks. Expect to adjust parameters (for example Replicate models name the duration input differently) on the first real run. Starting a shot is limited by the access code, not the per-IP rate limit, so keep `APP_ACCESS_CODE` set wherever video keys are.

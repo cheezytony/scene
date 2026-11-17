@@ -13,6 +13,8 @@ interface Format {
   ext: string;
   mime: string;
   build: (scene: Scene) => string;
+  /** Only offered when the scene has something to put in it. */
+  has?: (scene: Scene) => boolean;
   /** Offer a copy-to-clipboard button too (only for things you would paste somewhere). */
   copyable?: boolean;
 }
@@ -33,6 +35,7 @@ const FORMATS: Format[] = [
     ext: "md",
     mime: "text/markdown",
     build: transcriptMarkdown,
+    has: (s) => s.transcript.length > 0,
     copyable: true,
   },
   {
@@ -42,6 +45,7 @@ const FORMATS: Format[] = [
     ext: "csv",
     mime: "text/csv",
     build: shotListCsv,
+    has: (s) => s.cameras.length > 0,
   },
 ];
 
@@ -50,10 +54,12 @@ export default function ExportStep({
   scene,
   onBack,
   onNewScene,
+  onMovie,
 }: {
   scene: Scene;
   onBack: () => void;
   onNewScene: () => void;
+  onMovie: () => void;
 }) {
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
@@ -82,7 +88,7 @@ export default function ExportStep({
       </header>
 
       <ul className="flex flex-col gap-3">
-        {FORMATS.map((f) => (
+        {FORMATS.filter((f) => !f.has || f.has(scene)).map((f) => (
           <li key={f.id} className={`${card} flex flex-wrap items-center justify-between gap-4 px-6 py-5`}>
             <div className="min-w-0 flex-1">
               <h2 className="font-heading text-2xl">
@@ -103,6 +109,16 @@ export default function ExportStep({
           </li>
         ))}
       </ul>
+
+      <div className={`${card} flex flex-wrap items-center justify-between gap-4 px-6 py-5`}>
+        <div className="min-w-0 flex-1">
+          <h2 className="font-heading text-2xl">Make it a film</h2>
+          <p className="mt-1 text-sm text-white/50">Use your scene to direct an AI video model, shot by shot. You&apos;ll see the cost first.</p>
+        </div>
+        <button onClick={onMovie} className={primaryBtn}>
+          Continue <span aria-hidden>→</span>
+        </button>
+      </div>
 
       <div className="flex items-center justify-between">
         <button onClick={onBack} className={ghostBtn}>

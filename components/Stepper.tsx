@@ -1,16 +1,17 @@
 "use client";
 
-export type Step = "script" | "settings" | "preview" | "export";
+export type Step = "script" | "settings" | "preview" | "export" | "movie";
 
 const STEPS: { id: Step; label: string }[] = [
   { id: "script", label: "Script" },
   { id: "settings", label: "Settings" },
   { id: "preview", label: "Preview" },
   { id: "export", label: "Export" },
+  { id: "movie", label: "Movie" },
 ];
 
 /**
- * Where you are in the four steps. Steps you can reach are clickable; the rest wait quietly until
+ * Where you are in the steps. Steps you can reach are clickable; the rest wait quietly until
  * they make sense (there is nothing to preview before a scene exists).
  */
 export default function Stepper({

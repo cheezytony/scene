@@ -4,9 +4,12 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { Scene } from "@/lib/schema";
 import { createHistory, historyReducer } from "@/lib/history";
 import { DEFAULT_LIMITS, type Limits } from "@/lib/limits";
+import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from "@/lib/prefs";
 import { SCHEMA_VERSION, SceneFormatError, migrateScene } from "@/lib/migrate";
 import { SAMPLE_SCRIPT } from "@/lib/sample";
 import { gentleError, howLong } from "@/lib/voice";
+import MovieStep from "@/components/MovieStep";
+import type { Ready } from "@/components/ModelPicker";
 import ExportStep from "@/components/ExportStep";
 import GeneratingView from "@/components/GeneratingView";
 import PreviewStep from "@/components/PreviewStep";
@@ -16,7 +19,7 @@ import Stepper, { type Step } from "@/components/Stepper";
 import type { EditFn } from "@/components/ui";
 
 /**
- * Four calm steps: bring a script, tweak a few settings, preview the scene, export it.
+ * Calm steps: bring a script (or an idea), tweak a few settings, preview the scene, export it, and, if you like, turn it into a film.
  * This component only conducts; each step lives in its own component.
  */
 export default function Home() {
@@ -24,6 +27,18 @@ export default function Home() {
   const [script, setScript] = useState("");
   const [limits, setLimits] = useState<Limits>(DEFAULT_LIMITS);
   const [accessCode, setAccessCode] = useState("");
+  // Choices (what to make, which models, the exchange rate) are remembered in this browser. The first
+  // screen shows nothing that depends on them, so reading storage here is hydration-safe.
+  const [prefs, setPrefs] = useState<Prefs>(() => (typeof window === "undefined" ? DEFAULT_PREFS : loadPrefs()));
+  useEffect(() => savePrefs(prefs), [prefs]);
+  // Which AI services have a key on the server, so settings can say what is ready.
+  const [ready, setReady] = useState<Ready>(null);
+  useEffect(() => {
+    fetch("/api/providers")
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setReady)
+      .catch(() => setReady(null));
+  }, []);
 
   // The scene lives in an undo history: every edit is undoable, and opening a scene starts fresh.
   const [history, dispatch] = useReducer(historyReducer<Scene | null>, createHistory<Scene | null>(null));
@@ -83,7 +98,7 @@ export default function Home() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(accessCode ? { "x-access-code": accessCode } : {}) },
-        body: JSON.stringify({ script, limits }),
+        body: JSON.stringify({ script, limits, outputs: prefs.outputs, model: prefs.preview }),
         signal: controller.signal,
       });
       // Platform errors (timeouts, size limits) are not JSON, so parse defensively.
@@ -113,6 +128,21 @@ export default function Home() {
       setLoading(false);
       if (abort.current === controller) abort.current = null;
     }
+  }
+
+  /** Writes a script from an idea (the script step shows it for reading and editing before anything else). */
+  async function writeScript(idea: string): Promise<string> {
+    const res = await fetch("/api/script", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(accessCode ? { "x-access-code": accessCode } : {}) },
+      body: JSON.stringify({ idea, model: prefs.preview }),
+    });
+    let data: { script?: string; error?: string } | null = null;
+    try {
+      data = JSON.parse(await res.text());
+    } catch {}
+    if (!res.ok || !data?.script) throw new Error(data?.error ?? `The server hit a snag (${res.status}).`);
+    return data.script;
   }
 
   function newScene() {
@@ -145,7 +175,7 @@ export default function Home() {
     if (loading) return false;
     if (s === "script") return true;
     if (s === "settings") return scriptReady(script);
-    return !!scene; // preview and export need a scene
+    return !!scene; // preview, export and the movie need a scene
   };
 
   return (
@@ -173,9 +203,14 @@ export default function Home() {
             onImportFile={(f) => void importFile(f)}
             onContinue={() => setStep("settings")}
             importError={importError}
+            onWriteScript={writeScript}
           />
         ) : step === "settings" ? (
           <SettingsStep
+            script={script}
+            prefs={prefs}
+            onPrefs={setPrefs}
+            ready={ready}
             limits={limits}
             onLimits={setLimits}
             accessCode={accessCode}
@@ -200,7 +235,9 @@ export default function Home() {
             onContinue={() => setStep("export")}
           />
         ) : step === "export" && scene ? (
-          <ExportStep scene={scene} onBack={() => setStep("preview")} onNewScene={newScene} />
+          <ExportStep scene={scene} onBack={() => setStep("preview")} onNewScene={newScene} onMovie={() => setStep("movie")} />
+        ) : step === "movie" && scene ? (
+          <MovieStep scene={scene} prefs={prefs} onPrefs={setPrefs} ready={ready} accessCode={accessCode} onBack={() => setStep("export")} />
         ) : null}
       </main>
     </div>

@@ -11,7 +11,8 @@ const WINDOW_MS = 10 * 60_000;
 const MAX_REQUESTS = 6;
 const hits = new Map<string, number[]>();
 
-export function guard(req: Request): Response | null {
+/** The access-code half only, for cheap follow-up calls (polling, downloads) that shouldn't use up the rate limit. */
+export function checkAccess(req: Request): Response | null {
   const expected = process.env.APP_ACCESS_CODE;
   if (!expected) {
     if (process.env.NODE_ENV === "production") {
@@ -24,6 +25,12 @@ export function guard(req: Request): Response | null {
       return Response.json({ error: "Access code required or incorrect." }, { status: 401 });
     }
   }
+  return null;
+}
+
+export function guard(req: Request): Response | null {
+  const denied = checkAccess(req);
+  if (denied) return denied;
 
   const now = Date.now();
   if (hits.size > 1000) {

@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef } from "react";
-import { primaryBtn } from "./ui";
+import { useRef, useState } from "react";
+import { field, primaryBtn } from "./ui";
 
 const MIN_CHARS = 20;
 export const scriptReady = (script: string) => script.trim().length >= MIN_CHARS;
@@ -14,6 +14,7 @@ export default function ScriptStep({
   onImportFile,
   onContinue,
   importError,
+  onWriteScript,
 }: {
   script: string;
   onScript: (s: string) => void;
@@ -21,7 +22,27 @@ export default function ScriptStep({
   onImportFile: (file: File) => void;
   onContinue: () => void;
   importError: string | null;
+  /** Writes a short script from an idea. Rejects with a readable message if it can't. */
+  onWriteScript: (idea: string) => Promise<string>;
 }) {
+  const [mode, setMode] = useState<"script" | "idea">("script");
+  const [idea, setIdea] = useState("");
+  const [writing, setWriting] = useState(false);
+  const [writeError, setWriteError] = useState<string | null>(null);
+
+  async function write() {
+    setWriting(true);
+    setWriteError(null);
+    try {
+      onScript(await onWriteScript(idea));
+      setMode("script"); // show what was written, ready to read and edit
+    } catch (e) {
+      setWriteError(e instanceof Error ? e.message : "That didn't work. Try again in a moment.");
+    } finally {
+      setWriting(false);
+    }
+  }
+
   const fileInput = useRef<HTMLInputElement>(null);
   const lines = script.split("\n").filter((l) => l.trim()).length;
   const minutes = Math.max(1, Math.round(lines / 55));
@@ -36,6 +57,43 @@ export default function ScriptStep({
         </p>
       </header>
 
+      <div role="tablist" aria-label="How to begin" className="mx-auto flex gap-1 rounded-full border border-white/10 p-1 text-sm">
+        {(["script", "idea"] as const).map((m) => (
+          <button
+            key={m}
+            role="tab"
+            aria-selected={mode === m}
+            onClick={() => setMode(m)}
+            className={`rounded-full px-5 py-1.5 transition-colors ${mode === m ? "bg-white/12 text-white" : "text-white/55 hover:text-white"}`}
+          >
+            {m === "script" ? "I have a script" : "I just have an idea"}
+          </button>
+        ))}
+      </div>
+
+      {mode === "idea" ? (
+        <div className="flex flex-col gap-4">
+          <p className="rounded-2xl bg-white/[0.04] px-5 py-4 text-sm leading-relaxed text-white/65">
+            A short idea gives us less to go on, so we&apos;ll write a short script from it first, and it may come out a little generic.
+            Nothing is final: you&apos;ll read it here, change anything you like, and only then carry on.
+          </p>
+          <textarea
+            value={idea}
+            onChange={(e) => setIdea(e.target.value)}
+            maxLength={4000}
+            aria-label="Your idea"
+            placeholder="Two strangers share an umbrella on the last train home, and one of them is carrying a secret."
+            className={`${field} h-40 w-full resize-none rounded-2xl p-5 text-base leading-relaxed`}
+          />
+          {writeError && <p role="alert" className="rounded-xl bg-amber-400/10 px-4 py-3 text-sm text-amber-100/90">{writeError}</p>}
+          <div className="flex justify-center">
+            <button onClick={() => void write()} disabled={writing || idea.trim().length < 5} className={primaryBtn}>
+              {writing ? "Writing…" : "Write me a script"}
+            </button>
+          </div>
+        </div>
+      ) : (
+      <>
       <div className="flex flex-col gap-3">
         <textarea
           value={script}
@@ -81,6 +139,8 @@ export default function ScriptStep({
           <span aria-hidden>→</span>
         </button>
       </div>
+      </>
+      )}
     </section>
   );
 }

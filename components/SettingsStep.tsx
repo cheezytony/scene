@@ -1,10 +1,20 @@
 "use client";
 
 import { DEFAULT_LIMITS, LIMIT_FIELDS, limitConflicts, type Limits } from "@/lib/limits";
+import { estimatePreview } from "@/lib/cost";
+import { OUTPUT_INFO, normalizeOutputs, type OutputId } from "@/lib/outputs";
+import { pricesFor } from "@/lib/catalog";
+import type { Prefs } from "@/lib/prefs";
+import CostPanel, { Money } from "./CostPanel";
+import { PreviewModelPicker, type Ready } from "./ModelPicker";
 import { card, field, ghostBtn, primaryBtn } from "./ui";
 
 /** Step two: a few optional guardrails, then make the scene. */
 export default function SettingsStep({
+  script,
+  prefs,
+  onPrefs,
+  ready,
   limits,
   onLimits,
   accessCode,
@@ -15,6 +25,10 @@ export default function SettingsStep({
   onBackToScene,
   onCreate,
 }: {
+  script: string;
+  prefs: Prefs;
+  onPrefs: (p: Prefs) => void;
+  ready: Ready;
   limits: Limits;
   onLimits: (l: Limits) => void;
   accessCode: string;
@@ -26,6 +40,9 @@ export default function SettingsStep({
   onCreate: () => void;
 }) {
   const conflicts = limitConflicts(limits);
+  const est = estimatePreview({ scriptChars: script.length, outputs: prefs.outputs, limits, model: prefs.preview });
+  const price = pricesFor(prefs.preview);
+  const rate = prefs.usdToNgn;
 
   return (
     <section className="rise mx-auto flex w-full max-w-3xl flex-col gap-8">
@@ -52,7 +69,54 @@ export default function SettingsStep({
         </div>
       )}
 
-      <div className={`${card} divide-y divide-white/8`}>
+      <div className="flex flex-col gap-3">
+        <h2 className="font-heading text-2xl">What should we make?</h2>
+        <ul className={`${card} divide-y divide-white/8`}>
+          {OUTPUT_INFO.map((o) => (
+            <li key={o.id}>
+              <label className={`flex items-start gap-4 px-5 py-4 ${o.locked ? "" : "cursor-pointer"}`}>
+                <input
+                  type="checkbox"
+                  checked={prefs.outputs[o.id]}
+                  disabled={o.locked}
+                  onChange={(e) => onPrefs({ ...prefs, outputs: normalizeOutputs({ ...prefs.outputs, [o.id as OutputId]: e.target.checked }) })}
+                  className="mt-1 h-4 w-4 accent-[#ece7df]"
+                />
+                <span>
+                  <span className="block text-[15px]">{o.label}</span>
+                  <span className="block text-sm text-white/40">{o.hint}</span>
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <h2 className="font-heading text-2xl">Who should make it?</h2>
+        <div className={card}>
+          <PreviewModelPicker value={prefs.preview} onChange={(preview) => onPrefs({ ...prefs, preview })} ready={ready} />
+        </div>
+      </div>
+
+      <CostPanel
+        title="Estimated cost of this scene"
+        usd={est.usd}
+        tokens={est.tokens}
+        rate={rate}
+        onRate={(usdToNgn) => onPrefs({ ...prefs, usdToNgn })}
+        rows={[
+          { label: "Your script", value: `about ${est.beats} beat${est.beats === 1 ? "" : "s"}` },
+          { label: "Model calls", value: `~${est.calls}` },
+          { label: "Likely", value: <Money usd={est.usd ? est.usd.expected : null} rate={rate} /> },
+          ...(price.known ? [] : [{ label: "Tip", value: "enter the model's prices above to count it" }]),
+        ]}
+      />
+
+      <div className="flex flex-col gap-3">
+        <h2 className="font-heading text-2xl">Guardrails</h2>
+        <p className="-mt-1 text-sm text-white/40">These apply to characters &amp; props{prefs.outputs.cast ? "." : ", which you haven't chosen above."}</p>
+      <div className={`${card} divide-y divide-white/8 ${prefs.outputs.cast ? "" : "opacity-50"}`}>
         {LIMIT_FIELDS.map((f) => (
           <label key={f.key} className="flex items-center justify-between gap-6 px-5 py-4">
             <span>
@@ -82,6 +146,7 @@ export default function SettingsStep({
         <button onClick={() => onLimits(DEFAULT_LIMITS)} className="text-sm text-white/40 underline-offset-4 hover:text-white/70 hover:underline">
           Back to the defaults
         </button>
+      </div>
       </div>
 
       <label className={`${card} flex items-center justify-between gap-6 px-5 py-4`}>

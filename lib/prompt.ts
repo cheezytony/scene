@@ -33,9 +33,14 @@ Also produce layout: for every location the script visits, the position and rota
 
 If the request includes a <layout>, it fixes where the stationary entities are in each place. Use exactly those positions and rotations for them whenever they are in that place, and never move them unless the script does; build everything else around them.
 
+If the request includes an <outputs> note, follow it (for example, leave cameras empty and produce only keyframes).
+
 If the request includes a <chunk> note, you are producing only part of the film: follow it exactly, and still use the full outline and cast for context.`,
 };
 
 export function stagePrompt(stage: StageName): string {
   return `${WORLD}\n\n${TASKS[stage]}`;
 }
+
+/** Turns a short idea into a short screenplay, for people who do not have a script yet. */
+export const IDEA_TO_SCRIPT_PROMPT = `You are a screenwriter. The user gives a short idea for a film or scene. Write a compact screenplay for it in standard format (scene headings like "INT. KITCHEN - MORNING", action lines, character names in capitals, dialogue). Keep it filmable: a few locations, a handful of characters, concrete physical action. Aim for two to five pages unless the idea clearly asks for more. Return only the screenplay text, with no commentary or markdown.`;

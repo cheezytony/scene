@@ -413,3 +413,40 @@ test("a failed transcript fails the analysis and leaves no unhandled rejection",
     process.off("unhandledRejection", onUnhandled);
   }
 });
+
+test("outputs: leaving out cast and transcript skips those stages entirely", async () => {
+  const { run, requests } = fakeRun({ outline: [outline], cast: [], motion: [] });
+  const result = await analyzeScript({
+    script: "INT. ROOM - DAY",
+    limits: none,
+    run,
+    outputs: { transcript: false, cast: false, cameras: false },
+  });
+  assert.deepEqual(requests.map((r) => r.stage), ["outline"]);
+  assert.equal(result.scene.timeline.length, 1);
+  assert.deepEqual([result.scene.transcript, result.scene.entities, result.scene.keyframes, result.scene.cameras], [[], [], [], []]);
+  assert.equal(result.stats.motionChunks, 0);
+});
+
+test("outputs: cast without cameras tells motion not to make cameras, and drops any that come back", async () => {
+  const { run, requests } = fakeRun({
+    outline: [outline],
+    cast: [{ entities: [entity("e_mara", "character")], layout: [] }],
+    motion: [{ keyframes: [keyframe("k1", "e_mara")], cameras: [{ id: "c1", t: 0, beatId: "b1", label: "x", shot: "wide", movement: "static", position: v3(0, 1, 5), lookAt: v3(0, 1, 0), fov: 40, targetEntityId: "", note: "" }] }],
+  });
+  const result = await analyzeScript({ script: "INT. ROOM - DAY", limits: none, run, outputs: { transcript: false, cast: true, cameras: false } });
+  assert.match(lastMotionPrompt(requests), /Do not produce cameras/);
+  assert.equal(result.scene.cameras.length, 0);
+  assert.equal(result.scene.keyframes.length, 1);
+  assert.ok(!requests.some((r) => r.stage === "transcript"));
+});
+
+test("outputs: cameras imply the cast they are aimed at", async () => {
+  const { run, requests } = fakeRun({
+    outline: [outline],
+    cast: [{ entities: [entity("e_mara", "character")], layout: [] }],
+    motion: [motion([keyframe("k1", "e_mara")])],
+  });
+  await analyzeScript({ script: "INT. ROOM - DAY", limits: none, run, outputs: { cameras: true } });
+  assert.ok(requests.some((r) => r.stage === "cast"));
+});

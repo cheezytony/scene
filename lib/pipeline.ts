@@ -12,6 +12,7 @@ import {
 import { checkCounts, checkRelations, describeLimits, type Limits } from "./limits";
 import { placeKey, planChunks, type Chunk, type ChunkOptions } from "./chunks";
 import { stagePrompt } from "./prompt";
+import { ALL_OUTPUTS, normalizeOutputs, type Outputs } from "./outputs";
 
 export type StageName = "outline" | "transcript" | "cast" | "motion";
 
@@ -142,8 +143,11 @@ export async function analyzeScript(input: {
   chunking?: Partial<ChunkOptions>;
   /** Most model calls in flight at once while planning motion. */
   maxParallel?: number;
+  /** Which outputs to make (default: all). Skipped outputs are empty in the scene and cost nothing. */
+  outputs?: Partial<Outputs>;
 }): Promise<AnalysisResult> {
   const { script, limits, run, chunking } = input;
+  const outputs = normalizeOutputs(input.outputs ?? ALL_OUTPUTS);
   const maxParallel = Math.max(1, Math.floor(input.maxParallel ?? DEFAULT_MAX_PARALLEL));
   const startedAt = Date.now();
   const usage: Usage = { input_tokens: 0, output_tokens: 0 };
@@ -217,17 +221,25 @@ export async function analyzeScript(input: {
   // The outline and the cast read only the script, so they start together. The transcript needs the
   // outline's beats but nothing else, and motion needs the outline and the cast, so once the outline
   // is done the (long) transcript runs alongside motion instead of in front of it.
+  type Issues<T> = Promise<{ data: T; issues: string[] }>;
   const outlineP = runStage("outline", OutlineSchema, "");
-  const castP = runStage("cast", CastStageSchema, "", (d) => checkCounts(d.entities, limits));
   const outlineContext = (o: z.infer<typeof OutlineSchema>) => `\n\n<outline>\n${JSON.stringify(o)}\n</outline>`;
 
-  const transcriptP = outlineP.then((o) => runStage("transcript", TranscriptSchema, outlineContext(o.data)));
+  const castP: Issues<z.infer<typeof CastStageSchema>> = outputs.cast
+    ? runStage("cast", CastStageSchema, "", (d) => checkCounts(d.entities, limits))
+    : Promise.resolve({ data: { entities: [], layout: [] }, issues: [] });
+
+  const transcriptP: Issues<z.infer<typeof TranscriptSchema>> = outputs.transcript
+    ? outlineP.then((o) => runStage("transcript", TranscriptSchema, outlineContext(o.data)))
+    : Promise.resolve({ data: { transcript: [] }, issues: [] });
 
   // Motion is by far the longest stage and grows with the script, so it is planned per chunk (cut at
   // place changes) and the chunks run in parallel: wall time follows the longest chunk, not the film.
+  const noCameras = outputs.cameras ? "" : "\n\n<outputs>\nDo not produce cameras: return an empty cameras array.\n</outputs>";
   const motionP = Promise.all([outlineP, castP]).then(async ([outline, cast]) => {
     const entities: Entity[] = cast.data.entities;
-    const context = `${outlineContext(outline.data)}\n\n<cast>\n${JSON.stringify(entities)}\n</cast>`;
+    if (!outputs.cast) return { outline, cast, entities, chunks: [] as Chunk[], parts: [] as { data: Motion; issues: string[] }[] };
+    const context = `${outlineContext(outline.data)}\n\n<cast>\n${JSON.stringify(entities)}\n</cast>${noCameras}`;
     const chunks = planChunks(outline.data.timeline, outline.data.durationSec, chunking);
     const parts = await mapLimit(chunks, maxParallel, (chunk, i) => {
       const locations = outline.data.timeline.filter((b) => chunk.beatIds.includes(b.id)).map((b) => b.location);
@@ -242,7 +254,10 @@ export async function analyzeScript(input: {
   });
 
   const [transcript, { outline, cast, entities, chunks, parts: motionParts }] = await Promise.all([transcriptP, motionP]);
-  const motion = mergeMotion(motionParts.map((p) => p.data), chunks);
+  const motion = chunks.length
+    ? mergeMotion(motionParts.map((p) => p.data), chunks)
+    : { keyframes: [], cameras: [] };
+  if (!outputs.cameras) motion.cameras = [];
 
   const scene = normalizeScene(assemble(outline.data, transcript.data.transcript, entities, motion));
   const violations = [...new Set([...cast.issues, ...motionParts.flatMap((p) => p.issues)])];
